@@ -2,14 +2,15 @@ package main
 
 import (
 	"fmt"
+	"log"
+	"strings"
+	"time"
+
 	"github.com/centrifugal/gocent/v3"
 	"github.com/gin-gonic/gin"
 	"github.com/gocql/gocql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-	"log"
-	"strings"
-	"time"
 
 	"be-chat-centrifugo/config"
 	"be-chat-centrifugo/module/chat/business"
@@ -110,6 +111,8 @@ func main() {
 	})
 
 	routes.SetupRoutes(r, authHandler, chatHandler, convHandler, userHandler, cfg.JWTSecret)
+
+	routes.RegisterHealthCheck(r, db, session, c)
 
 	// 8. Start server
 	port := cfg.Port
