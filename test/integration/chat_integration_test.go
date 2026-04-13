@@ -68,6 +68,7 @@ func TestChatServiceIntegration(t *testing.T) {
 
 	// Use unique username to isolate test execution
 	username := fmt.Sprintf("testuser_%d", time.Now().UnixNano())
+	username2 := fmt.Sprintf("testuser2_%d", time.Now().UnixNano())
 	password := "password123"
 
 	// Init Repositories
@@ -77,25 +78,28 @@ func TestChatServiceIntegration(t *testing.T) {
 
 	jwtSecret := "TEST_SECRET"
 
-	// Init Business layers
+	// Init Business layers — postgresStore satisfies both ConversationStorage and UserStorage
 	authBiz := business.NewAuthBusiness(postgresStore, jwtSecret)
-	chatBiz := business.NewChatBusiness(scyllaStore, mockPub, postgresStore)
+	chatBiz := business.NewChatBusiness(scyllaStore, mockPub, postgresStore, postgresStore)
 
 	// Init Handlers
 	authHandler := ginchat.NewAuthHandler(authBiz)
 	chatHandler := ginchat.NewChatHandler(chatBiz)
+	convHandler := ginchat.NewConversationHandler(chatBiz)
+	userHandler := ginchat.NewUserHandler(chatBiz)
 
 	// Setup Gin
 	gin.SetMode(gin.TestMode)
 	r := gin.Default()
-	routes.SetupRoutes(r, authHandler, chatHandler, jwtSecret)
+	routes.SetupRoutes(r, authHandler, chatHandler, convHandler, userHandler, jwtSecret)
 
 	var token string
 	var userID string
+	var user2ID string
 	var convID string
 
 	t.Run("Test Case 1: Register, Login, verify JWT", func(t *testing.T) {
-		// --- Action 1: Register ---
+		// --- Register user 1 ---
 		regReq := business.RegisterReq{
 			Username:  username,
 			Password:  password,
@@ -112,7 +116,24 @@ func TestChatServiceIntegration(t *testing.T) {
 			t.Fatalf("expected status 200 for register, got %d. Body: %s", w.Code, w.Body.String())
 		}
 
-		// --- Action 2: Login ---
+		// --- Register user 2 (for group tests) ---
+		regReq2 := business.RegisterReq{
+			Username:  username2,
+			Password:  password,
+			PublicKey: "sample_public_key_2",
+		}
+		b2, _ := json.Marshal(regReq2)
+		req2, _ := http.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewBuffer(b2))
+		req2.Header.Set("Content-Type", "application/json")
+
+		w2 := httptest.NewRecorder()
+		r.ServeHTTP(w2, req2)
+
+		if w2.Code != http.StatusOK {
+			t.Fatalf("expected status 200 for register user2, got %d. Body: %s", w2.Code, w2.Body.String())
+		}
+
+		// --- Login user 1 ---
 		loginReq := business.LoginReq{
 			Username: username,
 			Password: password,
@@ -140,58 +161,68 @@ func TestChatServiceIntegration(t *testing.T) {
 		}
 		token = tokenRaw
 
-		// Retrieve userID from database to use in the subsequent tests
+		// Retrieve userIDs from database
 		user, err := postgresStore.GetUserByUsername(context.Background(), username)
 		if err != nil {
 			t.Fatalf("failed to fetch created user: %v", err)
 		}
 		userID = user.ID
+
+		user2, err := postgresStore.GetUserByUsername(context.Background(), username2)
+		if err != nil {
+			t.Fatalf("failed to fetch created user2: %v", err)
+		}
+		user2ID = user2.ID
 	})
 
-	t.Run("Test Case 2: Create Group, save Participant to Postgres", func(t *testing.T) {
-		// Note: since there's no API route for Create Group, we directly test the business/storage workflow.
-		// Create Conversation
-		conv := &model.Conversation{
-			Name: "Test Group",
-			Type: model.ConversationTypeGroup,
+	t.Run("Test Case 2: Create Group via API, verify all participants", func(t *testing.T) {
+		groupReq := business.CreateGroupReq{
+			Name:      "Test Group",
+			MemberIDs: []string{userID, user2ID},
 		}
-		err := postgresStore.CreateConversation(context.Background(), conv)
-		if err != nil {
-			t.Fatalf("failed to create conversation: %v", err)
+		b, _ := json.Marshal(groupReq)
+		req, _ := http.NewRequest(http.MethodPost, "/api/v1/conversations", bytes.NewBuffer(b))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		if w.Code != http.StatusCreated {
+			t.Fatalf("expected status 201 for create group, got %d. Body: %s", w.Code, w.Body.String())
 		}
 
-		// Wait briefly or check immediately
-		if conv.ID == "" {
-			t.Fatalf("expected conversation ID to be populated by DB default gen_random_uuid")
-		}
-		convID = conv.ID
-
-		// Add Participant
-		participant := &model.Participant{
-			ConversationID: convID,
-			UserID:         userID,
-			JoinedAt:       time.Now(),
-		}
-		err = postgresStore.AddParticipant(context.Background(), participant)
-		if err != nil {
-			t.Fatalf("failed to add participant: %v", err)
+		// Parse response to get conversation ID
+		var resp map[string]interface{}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to decode create group response: %v", err)
 		}
 
-		// Verify Participant is saved
+		convData, ok := resp["data"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected 'data' object in response, got: %v", resp)
+		}
+		convID = convData["id"].(string)
+
+		if convID == "" {
+			t.Fatalf("expected conversation ID to be populated")
+		}
+
+		// Verify ALL participants are saved (creator + members, deduplicated)
 		var count int64
-		err = db.Model(&model.Participant{}).
-			Where("conversation_id = ? AND user_id = ?", convID, userID).
+		err := db.Model(&model.Participant{}).
+			Where("conversation_id = ?", convID).
 			Count(&count).Error
 		if err != nil {
 			t.Fatalf("failed to query participant count: %v", err)
 		}
-		if count == 0 {
-			t.Fatalf("failed to verify that participant was saved in Postgres")
+		// Creator (userID) is in MemberIDs, so after dedup we expect exactly 2
+		if count != 2 {
+			t.Fatalf("expected 2 participants in group, got %d", count)
 		}
 	})
 
-	t.Run("Test Case 3: Send message, verify saved to Scylla and published", func(t *testing.T) {
-		// Send Message logic
+	t.Run("Test Case 3: Send message, verify saved to Scylla and published with sender_name", func(t *testing.T) {
 		sendReq := business.SendMessageReq{
 			ConversationID:   convID,
 			ContentEncrypted: "encrypted_test_payload",
@@ -199,7 +230,7 @@ func TestChatServiceIntegration(t *testing.T) {
 		b, _ := json.Marshal(sendReq)
 		req, _ := http.NewRequest(http.MethodPost, "/api/v1/chat/messages", bytes.NewBuffer(b))
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+token) // Verify JWT via middleware
+		req.Header.Set("Authorization", "Bearer "+token)
 
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
@@ -216,24 +247,81 @@ func TestChatServiceIntegration(t *testing.T) {
 			t.Fatalf("failed to query message count in scylla: %v", err)
 		}
 
-		// In a real environment, depending on the test suite execution history, this conversation ID
-		// should precisely have 1 message since it was freshly generated.
 		if count != 1 {
 			t.Fatalf("expected 1 message in scylla for this conversation, got %d", count)
 		}
 
-		// Verify payload sent to Centrifugo mock
+		// Verify payload sent to Centrifugo mock contains enriched fields
 		if len(mockPub.PublishedMessages) != 1 {
 			t.Fatalf("expected 1 published message to centrifugo, got %d", len(mockPub.PublishedMessages))
 		}
 
-		publishedMsg, ok := mockPub.PublishedMessages[0].(*model.Message)
-		if !ok {
-			t.Fatalf("expected type *model.Message to be published")
+		// The published payload is now a *dto.CentrifugoMessagePayload, not *model.Message.
+		// We verify by checking the JSON representation contains sender_name.
+		pubJSON, err := json.Marshal(mockPub.PublishedMessages[0])
+		if err != nil {
+			t.Fatalf("failed to marshal published message: %v", err)
 		}
 
-		if publishedMsg.ConversationID != convID || publishedMsg.ContentEncrypted != "encrypted_test_payload" {
-			t.Fatalf("published message content doesn't match the sent request")
+		var pubMap map[string]interface{}
+		if err := json.Unmarshal(pubJSON, &pubMap); err != nil {
+			t.Fatalf("failed to unmarshal published message: %v", err)
+		}
+
+		if pubMap["sender_name"] == nil || pubMap["sender_name"] == "" {
+			t.Fatalf("expected sender_name in published payload, got: %v", pubMap)
+		}
+		if pubMap["conversation_id"] != convID {
+			t.Fatalf("published conversation_id doesn't match: got %v, want %s", pubMap["conversation_id"], convID)
+		}
+		if pubMap["content_encrypted"] != "encrypted_test_payload" {
+			t.Fatalf("published content_encrypted doesn't match: got %v", pubMap["content_encrypted"])
+		}
+	})
+
+	t.Run("Test Case 4: GET /api/v1/conversations returns user's conversations", func(t *testing.T) {
+		req, _ := http.NewRequest(http.MethodGet, "/api/v1/conversations", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected status 200 for list conversations, got %d. Body: %s", w.Code, w.Body.String())
+		}
+
+		var resp map[string]interface{}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("failed to decode list conversations response: %v", err)
+		}
+
+		data, ok := resp["data"].([]interface{})
+		if !ok {
+			t.Fatalf("expected 'data' array in response, got: %v", resp)
+		}
+
+		if len(data) == 0 {
+			t.Fatalf("expected at least 1 conversation for user, got 0")
+		}
+
+		// Verify the group conversation we created is in the list
+		found := false
+		for _, item := range data {
+			conv, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if conv["id"] == convID {
+				found = true
+				if conv["name"] != "Test Group" {
+					t.Fatalf("expected conversation name 'Test Group', got %v", conv["name"])
+				}
+				break
+			}
+		}
+
+		if !found {
+			t.Fatalf("conversation %s not found in user's conversation list", convID)
 		}
 	})
 }

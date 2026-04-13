@@ -86,11 +86,13 @@ func main() {
 
 	// 5. Initialize Services (Business Layer)
 	authBiz := business.NewAuthBusiness(postgresStore, cfg.JWTSecret)
-	chatBiz := business.NewChatBusiness(scyllaStore, publisher, postgresStore)
+	chatBiz := business.NewChatBusiness(scyllaStore, publisher, postgresStore, postgresStore)
 
 	// 6. Initialize Handlers (Transport Layer)
 	authHandler := ginchat.NewAuthHandler(authBiz)
 	chatHandler := ginchat.NewChatHandler(chatBiz)
+	convHandler := ginchat.NewConversationHandler(chatBiz)
+	userHandler := ginchat.NewUserHandler(chatBiz)
 
 	// 7. Setup Gin routing
 	r := gin.Default()
@@ -107,7 +109,7 @@ func main() {
 		c.Next()
 	})
 
-	routes.SetupRoutes(r, authHandler, chatHandler, cfg.JWTSecret)
+	routes.SetupRoutes(r, authHandler, chatHandler, convHandler, userHandler, cfg.JWTSecret)
 
 	// 8. Start server
 	port := cfg.Port

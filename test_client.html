@@ -3,391 +3,927 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Centrifugo Chat Tester</title>
+    <title>E2EE Chat — Centrifugo</title>
+    <meta name="description" content="End-to-End Encrypted Chat Client with RSA via JSEncrypt">
     <script src="https://unpkg.com/centrifuge@5.0.1/dist/centrifuge.js"></script>
+    <script src="https://unpkg.com/jsencrypt@3.3.2/bin/jsencrypt.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
-            --primary: #4f46e5;
-            --primary-hover: #4338ca;
-            --bg: #f3f4f6;
-            --card-bg: #ffffff;
-            --text-main: #1f2937;
-            --text-muted: #6b7280;
-            --border: #e5e7eb;
+            --primary: #6366f1;
+            --primary-hover: #4f46e5;
+            --primary-glow: rgba(99, 102, 241, 0.25);
+            --accent: #8b5cf6;
+            --bg: #0f172a;
+            --bg-card: #1e293b;
+            --bg-card-alt: #334155;
+            --bg-input: #1e293b;
+            --text-main: #f1f5f9;
+            --text-muted: #94a3b8;
+            --text-dim: #64748b;
+            --border: #334155;
+            --border-focus: #6366f1;
+            --success: #10b981;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+            --sent-bg: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+            --received-bg: #1e293b;
+            --system-bg: rgba(245, 158, 11, 0.1);
+            --system-border: rgba(245, 158, 11, 0.3);
+            --system-text: #fbbf24;
         }
 
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
         body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            background-color: var(--bg);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: var(--bg);
             color: var(--text-main);
-            margin: 0;
-            padding: 2rem;
             display: flex;
             justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 1rem;
         }
 
         .container {
-            background-color: var(--card-bg);
-            border-radius: 12px;
-            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
             width: 100%;
-            max-width: 600px;
+            max-width: 520px;
+            display: flex;
+            flex-direction: column;
+            height: 92vh;
             overflow: hidden;
-            display: flex;
-            flex-direction: column;
-            height: 80vh;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5),
+                        0 0 0 1px rgba(99, 102, 241, 0.1);
         }
 
+        /* ===== HEADER ===== */
         .header {
-            padding: 1.5rem;
-            border-bottom: 1px solid var(--border);
-            background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
-            color: white;
+            padding: 1.25rem 1.5rem;
+            background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 50%, #6366f1 100%);
+            position: relative;
+            overflow: hidden;
         }
-
+        .header::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            right: -20%;
+            width: 200px;
+            height: 200px;
+            background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%);
+            border-radius: 50%;
+        }
         .header h1 {
-            margin: 0;
-            font-size: 1.5rem;
+            font-size: 1.25rem;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            position: relative;
         }
-
         .header p {
-            margin: 0.5rem 0 0 0;
-            font-size: 0.875rem;
-            opacity: 0.9;
+            font-size: 0.8rem;
+            opacity: 0.85;
+            margin-top: 0.25rem;
+            position: relative;
         }
 
+        /* ===== STATUS INDICATORS ===== */
+        .status-dot {
+            display: inline-block;
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            background: var(--danger);
+            transition: background 0.3s, box-shadow 0.3s;
+        }
+        .status-dot.connected {
+            background: var(--success);
+            box-shadow: 0 0 8px rgba(16, 185, 129, 0.6);
+        }
+
+        .key-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.7rem;
+            font-weight: 600;
+            background: rgba(255,255,255,0.15);
+            backdrop-filter: blur(4px);
+            transition: all 0.3s;
+        }
+        .key-badge.active {
+            background: rgba(16, 185, 129, 0.2);
+            color: #6ee7b7;
+        }
+        .key-badge.inactive {
+            background: rgba(239, 68, 68, 0.2);
+            color: #fca5a5;
+        }
+
+        /* ===== AUTH PANEL ===== */
+        .auth-panel {
+            padding: 1.25rem 1.5rem;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-card);
+        }
+        .auth-panel.hidden { display: none; }
+
+        .auth-row {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 0.75rem;
+        }
+        .auth-row:last-child { margin-bottom: 0; }
+
+        /* ===== SETUP PANEL ===== */
         .setup-panel {
-            padding: 1.5rem;
+            padding: 1.25rem 1.5rem;
             border-bottom: 1px solid var(--border);
             display: flex;
             flex-direction: column;
-            gap: 1rem;
+            gap: 0.75rem;
+            background: var(--bg-card);
         }
 
         .form-group {
             display: flex;
             flex-direction: column;
+            gap: 0.35rem;
+        }
+
+        .form-row {
+            display: flex;
             gap: 0.5rem;
         }
+        .form-row .form-group { flex: 1; }
 
         label {
-            font-size: 0.875rem;
-            font-weight: 500;
+            font-size: 0.75rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
         }
 
-        input {
-            padding: 0.75rem;
+        input, select {
+            padding: 0.6rem 0.75rem;
+            background: var(--bg-input);
             border: 1px solid var(--border);
-            border-radius: 6px;
-            font-size: 1rem;
-            transition: border-color 0.2s;
+            border-radius: 8px;
+            color: var(--text-main);
+            font-size: 0.875rem;
+            font-family: inherit;
             outline: none;
+            transition: border-color 0.2s, box-shadow 0.2s;
         }
-
         input:focus {
-            border-color: var(--primary);
-            box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+            border-color: var(--border-focus);
+            box-shadow: 0 0 0 3px var(--primary-glow);
         }
+        input::placeholder { color: var(--text-dim); }
+        input[readonly] { opacity: 0.6; cursor: not-allowed; }
 
+        /* ===== BUTTONS ===== */
         button {
-            padding: 0.75rem 1.5rem;
-            background-color: var(--primary);
+            padding: 0.6rem 1rem;
+            background: var(--primary);
             color: white;
             border: none;
-            border-radius: 6px;
-            font-size: 1rem;
-            font-weight: 500;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            font-family: inherit;
             cursor: pointer;
-            transition: background-color 0.2s;
+            transition: all 0.2s;
+            white-space: nowrap;
         }
-
-        button:hover {
-            background-color: var(--primary-hover);
-        }
-
+        button:hover { background: var(--primary-hover); transform: translateY(-1px); }
+        button:active { transform: translateY(0); }
         button:disabled {
-            background-color: var(--text-muted);
+            background: var(--bg-card-alt);
+            color: var(--text-dim);
             cursor: not-allowed;
-            opacity: 0.7;
+            transform: none;
         }
 
+        .btn-outline {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-main);
+        }
+        .btn-outline:hover { border-color: var(--primary); color: var(--primary); background: transparent; }
+
+        .btn-success { background: var(--success); }
+        .btn-success:hover { background: #059669; }
+
+        .btn-sm { padding: 0.4rem 0.75rem; font-size: 0.8rem; }
+
+        /* ===== MESSAGES ===== */
         .messages-container {
             flex: 1;
-            padding: 1.5rem;
+            padding: 1rem 1.25rem;
             overflow-y: auto;
             display: flex;
             flex-direction: column;
-            gap: 0.5rem;
-            background-color: #f9fafb;
+            gap: 0.4rem;
+            background: var(--bg);
+            scroll-behavior: smooth;
         }
+        .messages-container::-webkit-scrollbar { width: 4px; }
+        .messages-container::-webkit-scrollbar-track { background: transparent; }
+        .messages-container::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 
         .message-row {
             display: flex;
             flex-direction: column;
+            animation: fadeInUp 0.25s ease-out;
+        }
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
         }
 
         .message-bubble {
-            padding: 0.75rem 1rem;
-            border-radius: 8px;
+            padding: 0.6rem 0.85rem;
+            border-radius: 12px;
             max-width: 85%;
             word-break: break-word;
-            font-size: 0.95rem;
-            line-height: 1.4;
+            font-size: 0.875rem;
+            line-height: 1.5;
         }
 
         .system-message .message-bubble {
-            background-color: #fffbeb;
-            color: #92400e;
-            border: 1px solid #fde68a;
+            background: var(--system-bg);
+            border: 1px solid var(--system-border);
+            color: var(--system-text);
             align-self: center;
-            font-size: 0.85rem;
-            padding: 0.5rem 1rem;
+            font-size: 0.75rem;
+            padding: 0.4rem 0.85rem;
+            border-radius: 20px;
         }
 
         .chat-message.received .message-bubble {
-            background-color: white;
+            background: var(--received-bg);
             border: 1px solid var(--border);
             align-self: flex-start;
-            border-bottom-left-radius: 2px;
+            border-bottom-left-radius: 4px;
+        }
+        .chat-message.received .sender-label {
+            font-size: 0.7rem;
+            font-weight: 600;
+            color: var(--accent);
+            margin-bottom: 2px;
         }
 
         .chat-message.sent .message-bubble {
-            background-color: #e0e7ff;
-            color: #3730a3;
+            background: var(--sent-bg);
+            color: white;
             align-self: flex-end;
-            border-bottom-right-radius: 2px;
+            border-bottom-right-radius: 4px;
         }
 
         .time-label {
-            font-size: 0.7rem;
-            color: var(--text-muted);
-            margin-top: 0.25rem;
-            text-align: right;
+            font-size: 0.65rem;
+            color: var(--text-dim);
+            margin-top: 0.2rem;
         }
+        .chat-message.sent .time-label { text-align: right; color: rgba(255,255,255,0.6); }
 
+        .encrypted-indicator {
+            font-size: 0.65rem;
+            display: flex;
+            align-items: center;
+            gap: 3px;
+            margin-top: 2px;
+        }
+        .encrypted-indicator.ok { color: var(--success); }
+        .encrypted-indicator.fail { color: var(--danger); }
+
+        /* ===== CHAT INPUT ===== */
         .chat-panel {
-            padding: 1.5rem;
+            padding: 1rem 1.25rem;
             border-top: 1px solid var(--border);
             display: flex;
             gap: 0.5rem;
-            background-color: white;
+            background: var(--bg-card);
         }
+        .chat-panel input { flex: 1; }
 
-        .chat-panel input {
-            flex: 1;
+        /* ===== USER INFO BAR ===== */
+        .user-info-bar {
+            padding: 0.5rem 1.25rem;
+            background: rgba(99, 102, 241, 0.05);
+            border-bottom: 1px solid var(--border);
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
         }
-
-        /* Status indicator */
-        .status-dot {
-            display: inline-block;
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background-color: #ef4444; /* red */
-            margin-right: 6px;
-        }
-        .status-dot.connected {
-            background-color: #10b981; /* green */
+        .user-info-bar.hidden { display: none; }
+        .user-info-bar .user-id-display {
+            font-family: 'Courier New', monospace;
+            font-size: 0.7rem;
+            color: var(--text-dim);
         }
     </style>
 </head>
 <body>
     <div class="container">
+        <!-- HEADER -->
         <div class="header">
-            <h1><span class="status-dot" id="statusDot"></span>Centrifugo Web Client</h1>
-            <p>Connect. Subscribe. Publish.</p>
+            <h1>
+                <span class="status-dot" id="statusDot"></span>
+                🔐 E2EE Chat
+                <span class="key-badge inactive" id="keyBadge">🔑 No Keys</span>
+            </h1>
+            <p>End-to-End Encrypted • RSA • JSEncrypt</p>
         </div>
 
+        <!-- AUTH PANEL -->
+        <div class="auth-panel" id="authPanel">
+            <div class="auth-row">
+                <input type="text" id="authUsername" placeholder="Username" style="flex:1">
+                <input type="password" id="authPassword" placeholder="Password" style="flex:1">
+            </div>
+            <div class="auth-row">
+                <button id="registerBtn" class="btn-outline" style="flex:1">Register</button>
+                <button id="loginBtn" class="btn-success" style="flex:1">Login</button>
+            </div>
+        </div>
+
+        <!-- USER INFO BAR (shown after login) -->
+        <div class="user-info-bar hidden" id="userInfoBar">
+            <span>Logged in as: <strong id="displayUsername"></strong></span>
+            <span class="user-id-display" id="displayUserId"></span>
+        </div>
+
+        <!-- SETUP PANEL -->
         <div class="setup-panel">
-            <div class="form-group">
-                <label for="token">User Connection Token (JWT)</label>
-                <input type="text" id="token" placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...">
+            <div class="form-row">
+                <div class="form-group">
+                    <label for="conversationId">Conversation ID</label>
+                    <input type="text" id="conversationId" placeholder="UUID of conversation">
+                </div>
+                <div class="form-group">
+                    <label for="receiverId">Receiver User ID</label>
+                    <input type="text" id="receiverId" placeholder="UUID of receiver">
+                </div>
             </div>
             <div class="form-group">
-                <label for="conversationId">Conversation ID (UUID)</label>
-                <input type="text" id="conversationId" placeholder="a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11" value="a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11">
+                <label for="channel">Channel (auto-derived)</label>
+                <input type="text" id="channel" placeholder="chat:..." readonly>
             </div>
-            <div class="form-group">
-                <label for="channel">Channel Name (auto-filled from Conversation ID)</label>
-                <input type="text" id="channel" placeholder="chat:a0eebc99-..." value="chat:a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11" readonly>
-            </div>
-            <button id="connectBtn">Connect & Subscribe</button>
+            <button id="connectBtn" disabled>Connect & Subscribe</button>
         </div>
 
-        <div class="messages-container" id="messagesStr">
-            <!-- Messages will appear here -->
+        <!-- MESSAGES -->
+        <div class="messages-container" id="messagesContainer">
+            <!-- Messages appear here -->
         </div>
 
+        <!-- CHAT INPUT -->
         <div class="chat-panel">
-            <input type="text" id="messageInput" placeholder="Type a message..." disabled>
+            <input type="text" id="messageInput" placeholder="Type a message... (encrypted with RSA)" disabled>
             <button id="sendBtn" disabled>Send</button>
         </div>
     </div>
 
     <script>
-        let centrifuge = null;
-        let sub = null;
+    // ========================================================================
+    //  CONSTANTS & STATE
+    // ========================================================================
+    const API_BASE = 'http://localhost:8080/api/v1';
+    const CENTRIFUGO_WS = 'ws://localhost:8000/connection/websocket';
 
-        // Elements
-        const tokenInput = document.getElementById('token');
-        const conversationIdInput = document.getElementById('conversationId');
-        const channelInput = document.getElementById('channel');
-        const connectBtn = document.getElementById('connectBtn');
-        const messagesContainer = document.getElementById('messagesStr');
-        const messageInput = document.getElementById('messageInput');
-        const sendBtn = document.getElementById('sendBtn');
-        const statusDot = document.getElementById('statusDot');
+    let centrifuge = null;
+    let sub = null;
+    let currentToken = '';
+    let currentUserId = '';
+    let currentUsername = '';
+    let myPrivateKeyPem = '';  // PEM string (stored in localStorage)
+    let myPublicKeyPem = '';   // PEM string
 
-        // Auto-sync channel name from conversation ID
-        conversationIdInput.addEventListener('input', function() {
-            channelInput.value = 'chat:' + this.value.trim();
-        });
+    // Public key cache: { userID: pemString }
+    const publicKeyCache = {};
 
-        function getCurrentTime() {
-            const now = new Date();
-            return now.getHours().toString().padStart(2, '0') + ':' + now.getMinutes().toString().padStart(2, '0');
-        }
+    // ========================================================================
+    //  DOM ELEMENTS
+    // ========================================================================
+    const $ = id => document.getElementById(id);
+    const authPanel = $('authPanel');
+    const authUsername = $('authUsername');
+    const authPassword = $('authPassword');
+    const registerBtn = $('registerBtn');
+    const loginBtn = $('loginBtn');
+    const userInfoBar = $('userInfoBar');
+    const displayUsername = $('displayUsername');
+    const displayUserId = $('displayUserId');
+    const conversationIdInput = $('conversationId');
+    const receiverIdInput = $('receiverId');
+    const channelInput = $('channel');
+    const connectBtn = $('connectBtn');
+    const messagesContainer = $('messagesContainer');
+    const messageInput = $('messageInput');
+    const sendBtn = $('sendBtn');
+    const statusDot = $('statusDot');
+    const keyBadge = $('keyBadge');
 
-        function appendSystemMessage(text) {
-            const row = document.createElement('div');
-            row.className = 'message-row system-message';
-            row.innerHTML = `<div class="message-bubble">${text}</div>`;
-            messagesContainer.appendChild(row);
-            scrollToBottom();
-        }
+    // ========================================================================
+    //  E2EE — JSEncrypt Wrapper Functions
+    // ========================================================================
 
-        function appendChatMessage(data, isSent = false) {
-            const row = document.createElement('div');
-            row.className = `message-row chat-message ${isSent ? 'sent' : 'received'}`;
-            
-            // Format data appropriately
-            let content = typeof data === 'object' ? JSON.stringify(data) : data;
-            
-            row.innerHTML = `
-                <div class="message-bubble">
-                    ${content}
-                    <div class="time-label">${getCurrentTime()}</div>
-                </div>
-            `;
-            messagesContainer.appendChild(row);
-            scrollToBottom();
-        }
+    /**
+     * Generate a new RSA keypair using JSEncrypt (2048-bit).
+     * Returns { publicKeyPem, privateKeyPem }.
+     */
+    function generateRSAKeyPair() {
+        const crypt = new JSEncrypt({ default_key_size: 2048 });
+        crypt.getKey(); // triggers key generation
+        return {
+            publicKeyPem: crypt.getPublicKey(),
+            privateKeyPem: crypt.getPrivateKey(),
+        };
+    }
 
-        function scrollToBottom() {
-            messagesContainer.scrollTop = messagesContainer.scrollHeight;
-        }
+    /**
+     * Encrypt a plaintext string with the receiver's PEM public key.
+     * @param {string} plaintext - The message to encrypt.
+     * @param {string} publicKeyPem - The receiver's PEM-encoded RSA public key.
+     * @returns {string|false} Base64-encoded ciphertext, or false on failure.
+     */
+    function encryptMessage(plaintext, publicKeyPem) {
+        const encryptor = new JSEncrypt();
+        encryptor.setPublicKey(publicKeyPem);
+        const ciphertext = encryptor.encrypt(plaintext);
+        return ciphertext; // Base64 string or false
+    }
 
-        function toggleChatInputs(enabled) {
-            messageInput.disabled = !enabled;
-            sendBtn.disabled = !enabled;
-        }
+    /**
+     * Decrypt ciphertext with the user's own PEM private key.
+     * @param {string} ciphertext - Base64-encoded ciphertext.
+     * @param {string} privateKeyPem - The user's PEM-encoded RSA private key.
+     * @returns {string|false} Plaintext string, or false on failure.
+     */
+    function decryptMessage(ciphertext, privateKeyPem) {
+        const decryptor = new JSEncrypt();
+        decryptor.setPrivateKey(privateKeyPem);
+        const plaintext = decryptor.decrypt(ciphertext);
+        return plaintext; // string or false
+    }
 
-        connectBtn.addEventListener('click', () => {
-            const token = tokenInput.value.trim();
-            const channel = channelInput.value.trim();
-            
-            if (!channel) {
-                alert("Please enter a Conversation ID");
-                return;
-            }
-            
-            // Disconnect existing
-            if (centrifuge) {
-                centrifuge.disconnect();
-                if (sub) {
-                    sub.removeAllListeners();
+    // ========================================================================
+    //  KEY MANAGEMENT (localStorage — per-user scoped)
+    //
+    //  Keys are stored as:
+    //    e2ee_private_key_{userId}  →  PEM private key string
+    //    e2ee_public_key_{userId}   →  PEM public key string
+    //
+    //  ⚠️ Demo only! In production, use IndexedDB with non-extractable
+    //     CryptoKey objects or a hardware-backed key store.
+    // ========================================================================
+
+    function storeKeys(userId, publicPem, privatePem) {
+        localStorage.setItem(`e2ee_public_key_${userId}`, publicPem);
+        localStorage.setItem(`e2ee_private_key_${userId}`, privatePem);
+    }
+
+    function loadStoredKeys(userId) {
+        return {
+            publicPem: localStorage.getItem(`e2ee_public_key_${userId}`),
+            privatePem: localStorage.getItem(`e2ee_private_key_${userId}`),
+        };
+    }
+
+    function clearStoredKeys(userId) {
+        localStorage.removeItem(`e2ee_public_key_${userId}`);
+        localStorage.removeItem(`e2ee_private_key_${userId}`);
+    }
+
+    /**
+     * Ensure the user has a valid RSA keypair.
+     * 1. Check localStorage for existing keys.
+     * 2. If found → reuse them (restore session).
+     * 3. If not found → generate new pair, store, and sync to server.
+     *
+     * @returns {{ publicKeyPem: string, privateKeyPem: string }}
+     */
+    async function ensureKeyPair(userId) {
+        const stored = loadStoredKeys(userId);
+
+        if (stored.publicPem && stored.privatePem) {
+            // Verify the stored keys actually work
+            const testPlain = 'e2ee_key_check';
+            const testCipher = encryptMessage(testPlain, stored.publicPem);
+            if (testCipher) {
+                const testDecrypt = decryptMessage(testCipher, stored.privatePem);
+                if (testDecrypt === testPlain) {
+                    appendSystemMessage('🔑 Restored existing RSA keypair from localStorage.');
+                    return stored;
                 }
             }
-            
-            messagesContainer.innerHTML = ''; // clear history
-            
-            // Initialize Centrifugo Client
-            centrifuge = new Centrifuge("ws://localhost:8000/connection/websocket", {
-                token: token
+            // Keys are corrupt — regenerate
+            appendSystemMessage('⚠️ Stored keys are invalid. Regenerating...');
+            clearStoredKeys(userId);
+        }
+
+        // Generate fresh keypair
+        appendSystemMessage('🔑 Generating new RSA-2048 keypair (this may take a few seconds)...');
+        const keys = generateRSAKeyPair();
+        storeKeys(userId, keys.publicKeyPem, keys.privateKeyPem);
+
+        // Sync public key to server
+        await apiPut('/users/me/public-key', {
+            public_key: keys.publicKeyPem,
+        }, currentToken);
+        appendSystemMessage('✅ New keypair generated and synced to server.');
+
+        return keys;
+    }
+
+    function updateKeyBadge(active) {
+        if (active) {
+            keyBadge.textContent = '🔑 Keys Active';
+            keyBadge.className = 'key-badge active';
+        } else {
+            keyBadge.textContent = '🔑 No Keys';
+            keyBadge.className = 'key-badge inactive';
+        }
+    }
+
+    // ========================================================================
+    //  API HELPERS
+    // ========================================================================
+
+    async function apiPost(path, body, token = '') {
+        const headers = { 'Content-Type': 'application/json' };
+        if (token) headers['Authorization'] = 'Bearer ' + token;
+
+        const res = await fetch(API_BASE + path, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        return data;
+    }
+
+    async function apiGet(path, token = '') {
+        const headers = {};
+        if (token) headers['Authorization'] = 'Bearer ' + token;
+
+        const res = await fetch(API_BASE + path, { headers });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        return data;
+    }
+
+    async function apiPut(path, body, token = '') {
+        const headers = { 'Content-Type': 'application/json' };
+        if (token) headers['Authorization'] = 'Bearer ' + token;
+
+        const res = await fetch(API_BASE + path, {
+            method: 'PUT',
+            headers,
+            body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        return data;
+    }
+
+    /**
+     * Fetch and cache a user's public key from the backend.
+     * @param {string} userId - UUID of the user.
+     * @returns {string} PEM-encoded public key.
+     */
+    async function fetchPublicKey(userId) {
+        if (publicKeyCache[userId]) return publicKeyCache[userId];
+
+        const resp = await apiGet(`/users/${userId}/public-key`, currentToken);
+        const pk = resp.data.public_key;
+        if (!pk) throw new Error(`User ${userId} has no public key`);
+        publicKeyCache[userId] = pk;
+        return pk;
+    }
+
+    // ========================================================================
+    //  UI HELPERS
+    // ========================================================================
+
+    function getCurrentTime() {
+        const now = new Date();
+        return now.getHours().toString().padStart(2, '0') + ':' +
+               now.getMinutes().toString().padStart(2, '0');
+    }
+
+    function appendSystemMessage(text) {
+        const row = document.createElement('div');
+        row.className = 'message-row system-message';
+        row.innerHTML = `<div class="message-bubble">${text}</div>`;
+        messagesContainer.appendChild(row);
+        scrollToBottom();
+    }
+
+    function appendChatMessage(content, senderName, isSent, encStatus = 'ok') {
+        const row = document.createElement('div');
+        row.className = `message-row chat-message ${isSent ? 'sent' : 'received'}`;
+
+        let encIndicator = '';
+        if (encStatus === 'ok') {
+            encIndicator = '<div class="encrypted-indicator ok">🔒 E2E Encrypted</div>';
+        } else if (encStatus === 'fail') {
+            encIndicator = '<div class="encrypted-indicator fail">⚠️ Giải mã thất bại</div>';
+        }
+        // encStatus === 'none' → no indicator
+
+        const senderLabel = (!isSent && senderName)
+            ? `<div class="sender-label">${senderName}</div>`
+            : '';
+
+        row.innerHTML = `
+            <div class="message-bubble">
+                ${senderLabel}
+                ${content}
+                <div class="time-label">${getCurrentTime()}</div>
+                ${encIndicator}
+            </div>
+        `;
+        messagesContainer.appendChild(row);
+        scrollToBottom();
+    }
+
+    function scrollToBottom() {
+        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    }
+
+    function toggleChatInputs(enabled) {
+        messageInput.disabled = !enabled;
+        sendBtn.disabled = !enabled;
+    }
+
+    // ========================================================================
+    //  AUTH FLOW — Register / Login + Key Management
+    // ========================================================================
+
+    registerBtn.addEventListener('click', async () => {
+        const username = authUsername.value.trim();
+        const password = authPassword.value.trim();
+        if (!username || !password) return alert('Username and password required.');
+
+        try {
+            registerBtn.disabled = true;
+            registerBtn.textContent = 'Generating keys...';
+
+            // 1. Generate RSA keypair for registration
+            const keys = generateRSAKeyPair();
+
+            // 2. Register user with public key attached
+            await apiPost('/auth/register', {
+                username,
+                password,
+                public_key: keys.publicKeyPem,
             });
-            
-            // Client Events
-            centrifuge.on('connecting', function (ctx) {
-                appendSystemMessage(`Connecting to server...`);
-                statusDot.classList.remove('connected');
-                toggleChatInputs(false);
-            }).on('connected', function (ctx) {
-                appendSystemMessage(`Connected over ${ctx.transport}`);
-                statusDot.classList.add('connected');
-            }).on('disconnected', function (ctx) {
-                appendSystemMessage(`Disconnected: ${ctx.reason}`);
-                statusDot.classList.remove('connected');
-                toggleChatInputs(false);
-            }).connect();
-            
-            // Setup Subscription
-            sub = centrifuge.newSubscription(channel);
-            
-            // Subscription Events
-            sub.on('publication', function (ctx) {
-                appendChatMessage(ctx.data, false);
-            }).on('subscribing', function (ctx) {
-                appendSystemMessage(`Subscribing to channel '${channel}'...`);
-            }).on('subscribed', function (ctx) {
-                appendSystemMessage(`Successfully subscribed to '${channel}'`);
-                toggleChatInputs(true);
-            }).on('unsubscribed', function (ctx) {
-                appendSystemMessage(`Unsubscribed from '${channel}': ${ctx.reason}`);
-                toggleChatInputs(false);
-            }).on('error', function (ctx) {
-                appendSystemMessage(`Subscription Error: ${ctx.error.message}`);
-                console.error('Subscription error', ctx);
-            }).subscribe();
-            
-            connectBtn.textContent = 'Reconnect';
-        });
 
-        // Send message via Backend REST API → ScyllaDB + Centrifugo publish
-        async function sendMessage() {
-            const text = messageInput.value.trim();
-            if (!text) return;
+            appendSystemMessage(`✅ Registered "${username}" — public key saved on server.`);
+            appendSystemMessage('Now click Login to start chatting.');
+            registerBtn.textContent = 'Register';
+            registerBtn.disabled = false;
+        } catch (err) {
+            appendSystemMessage(`❌ Register failed: ${err.message}`);
+            registerBtn.textContent = 'Register';
+            registerBtn.disabled = false;
+        }
+    });
 
-            const token = tokenInput.value.trim();
-            const conversationId = conversationIdInput.value.trim();
+    loginBtn.addEventListener('click', async () => {
+        const username = authUsername.value.trim();
+        const password = authPassword.value.trim();
+        if (!username || !password) return alert('Username and password required.');
 
-            if (!conversationId) {
-                appendSystemMessage('Error: Conversation ID is required.');
+        try {
+            loginBtn.disabled = true;
+            loginBtn.textContent = 'Logging in...';
+
+            // 1. Authenticate and get JWT
+            const loginResp = await apiPost('/auth/login', { username, password });
+            currentToken = loginResp.data;
+            currentUsername = username;
+
+            // 2. Extract user_id from JWT payload
+            const payload = JSON.parse(atob(currentToken.split('.')[1]));
+            currentUserId = payload.user_id || payload.sub || '';
+
+            // 3. Ensure we have a valid RSA keypair
+            //    - Checks localStorage first (device persistence)
+            //    - Generates new keys if none found or if corrupt
+            //    - Syncs public key to server
+            const keys = await ensureKeyPair(currentUserId);
+            myPrivateKeyPem = keys.privatePem || keys.privateKeyPem;
+            myPublicKeyPem = keys.publicPem || keys.publicKeyPem;
+
+            appendSystemMessage(`✅ Logged in as "${username}".`);
+
+            // Update UI
+            updateKeyBadge(true);
+            authPanel.classList.add('hidden');
+            userInfoBar.classList.remove('hidden');
+            displayUsername.textContent = username;
+            displayUserId.textContent = currentUserId.substring(0, 8) + '...';
+            connectBtn.disabled = false;
+
+            loginBtn.textContent = 'Login';
+            loginBtn.disabled = false;
+        } catch (err) {
+            appendSystemMessage(`❌ Login failed: ${err.message}`);
+            loginBtn.textContent = 'Login';
+            loginBtn.disabled = false;
+        }
+    });
+
+    // ========================================================================
+    //  CENTRIFUGO CONNECTION & REAL-TIME DECRYPTION
+    // ========================================================================
+
+    conversationIdInput.addEventListener('input', function () {
+        channelInput.value = this.value.trim() ? 'chat:' + this.value.trim() : '';
+    });
+
+    connectBtn.addEventListener('click', () => {
+        const channel = channelInput.value.trim() || 'chat:' + conversationIdInput.value.trim();
+        if (!channel || channel === 'chat:') {
+            return alert('Please enter a Conversation ID');
+        }
+        channelInput.value = channel;
+
+        // Disconnect existing
+        if (centrifuge) {
+            centrifuge.disconnect();
+            if (sub) sub.removeAllListeners();
+        }
+
+        // Initialize Centrifugo Client
+        centrifuge = new Centrifuge(CENTRIFUGO_WS, { token: currentToken });
+
+        centrifuge.on('connecting', function (ctx) {
+            appendSystemMessage('Connecting to Centrifugo...');
+            statusDot.classList.remove('connected');
+            toggleChatInputs(false);
+        }).on('connected', function (ctx) {
+            appendSystemMessage(`Connected via ${ctx.transport}`);
+            statusDot.classList.add('connected');
+        }).on('disconnected', function (ctx) {
+            appendSystemMessage(`Disconnected: ${ctx.reason}`);
+            statusDot.classList.remove('connected');
+            toggleChatInputs(false);
+        }).connect();
+
+        // Subscribe to channel
+        sub = centrifuge.newSubscription(channel);
+
+        sub.on('publication', function (ctx) {
+            const data = ctx.data;
+
+            // Skip own messages — they are already shown optimistically
+            if (data.sender_id === currentUserId) return;
+
+            const senderLabel = data.sender_name || data.sender_id;
+
+            // ── DECRYPTION LOGIC ──
+            if (data.content_encrypted && myPrivateKeyPem) {
+                const plaintext = decryptMessage(data.content_encrypted, myPrivateKeyPem);
+
+                if (plaintext !== false && plaintext !== null) {
+                    // ✅ Decryption successful — show plaintext
+                    appendChatMessage(plaintext, senderLabel, false, 'ok');
+                } else {
+                    // ❌ Decryption failed — wrong key or not encrypted for us
+                    appendChatMessage(
+                        '<em>Tin nhắn đã được mã hóa hoặc lỗi giải mã.</em>',
+                        senderLabel,
+                        false,
+                        'fail'
+                    );
+                    console.warn('[E2EE] Decryption failed for message from', data.sender_id);
+                }
+            } else if (data.content_encrypted) {
+                // No private key loaded — cannot decrypt
+                appendChatMessage(
+                    '<em>Tin nhắn đã được mã hóa. Không có Private Key để giải mã.</em>',
+                    senderLabel,
+                    false,
+                    'fail'
+                );
+            } else {
+                // No encrypted content — show raw (should not happen in E2EE mode)
+                appendChatMessage(
+                    JSON.stringify(data),
+                    senderLabel,
+                    false,
+                    'none'
+                );
+            }
+        }).on('subscribing', function () {
+            appendSystemMessage(`Subscribing to '${channel}'...`);
+        }).on('subscribed', function () {
+            appendSystemMessage(`✅ Subscribed to '${channel}'`);
+            toggleChatInputs(true);
+        }).on('unsubscribed', function (ctx) {
+            appendSystemMessage(`Unsubscribed: ${ctx.reason}`);
+            toggleChatInputs(false);
+        }).on('error', function (ctx) {
+            appendSystemMessage(`⚠️ Subscription error: ${ctx.error.message}`);
+        }).subscribe();
+
+        connectBtn.textContent = 'Reconnect';
+    });
+
+    // ========================================================================
+    //  SEND MESSAGE — Encrypt with RECEIVER's public key → POST to API
+    //
+    //  Flow:
+    //  1. Read plaintext from input
+    //  2. Fetch receiver's public key from server (cached after first fetch)
+    //  3. Encrypt plaintext with receiver's public key using JSEncrypt
+    //  4. POST the ciphertext (Base64) to /api/v1/chat/messages
+    //  5. Backend stores ciphertext as-is in ScyllaDB (zero knowledge)
+    //  6. Centrifugo pushes ciphertext to all channel subscribers
+    //  7. Receiver decrypts with their own private key
+    // ========================================================================
+
+    async function sendMessage() {
+        const text = messageInput.value.trim();
+        if (!text) return;
+
+        const conversationId = conversationIdInput.value.trim();
+        const receiverId = receiverIdInput.value.trim();
+
+        if (!conversationId) {
+            appendSystemMessage('❌ Conversation ID is required.');
+            return;
+        }
+        if (!receiverId) {
+            appendSystemMessage('❌ Receiver User ID is required for encryption.');
+            return;
+        }
+
+        try {
+            sendBtn.disabled = true;
+
+            // 1. Fetch the receiver's public key
+            let receiverPublicKey;
+            try {
+                receiverPublicKey = await fetchPublicKey(receiverId);
+            } catch (err) {
+                appendSystemMessage(`❌ Cannot fetch receiver's public key: ${err.message}`);
+                sendBtn.disabled = false;
                 return;
             }
 
-            try {
-                const res = await fetch('http://localhost:8080/api/v1/chat/messages', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': 'Bearer ' + token
-                    },
-                    body: JSON.stringify({
-                        conversation_id: conversationId,
-                        content_encrypted: text
-                    })
-                });
-
-                if (!res.ok) {
-                    const errBody = await res.json().catch(() => ({}));
-                    appendSystemMessage(`Send failed (${res.status}): ${errBody.error || res.statusText}`);
-                    return;
-                }
-
-                appendChatMessage({ content_encrypted: text }, true);
-                messageInput.value = '';
-            } catch (err) {
-                appendSystemMessage(`Network error: ${err.message}`);
-                console.error('Send message error:', err);
+            // 2. Encrypt the plaintext with the RECEIVER's public key
+            const ciphertext = encryptMessage(text, receiverPublicKey);
+            if (!ciphertext) {
+                appendSystemMessage('❌ Encryption failed. Message too long for RSA (max ~245 bytes).');
+                sendBtn.disabled = false;
+                return;
             }
+
+            // 3. Send encrypted message to backend
+            await apiPost('/chat/messages', {
+                conversation_id: conversationId,
+                content_encrypted: ciphertext,
+            }, currentToken);
+
+            // 4. Show plaintext locally (optimistic UI — sender knows what they typed)
+            appendChatMessage(text, null, true, 'ok');
+            messageInput.value = '';
+            sendBtn.disabled = false;
+        } catch (err) {
+            appendSystemMessage(`❌ Send failed: ${err.message}`);
+            sendBtn.disabled = false;
         }
+    }
 
-        sendBtn.addEventListener('click', sendMessage);
-        messageInput.addEventListener('keypress', function (e) {
-            if (e.key === 'Enter') {
-                sendMessage();
-            }
-        });
+    sendBtn.addEventListener('click', sendMessage);
+    messageInput.addEventListener('keypress', function (e) {
+        if (e.key === 'Enter') sendMessage();
+    });
+
+    // ========================================================================
+    //  INIT
+    // ========================================================================
+
+    (function init() {
+        appendSystemMessage('Welcome! Register or Login to start chatting with E2E encryption.');
+        appendSystemMessage('🔐 Using RSA-2048 via JSEncrypt. Messages are encrypted client-side.');
+    })();
     </script>
 </body>
 </html>

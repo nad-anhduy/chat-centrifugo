@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS users (
     username VARCHAR(255) NOT NULL CONSTRAINT uni_users_username UNIQUE,
     email VARCHAR(255),
     password_hash VARCHAR(255) NOT NULL,
-    public_key TEXT,
+    public_key TEXT NOT NULL DEFAULT '',
     avatar_url TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP

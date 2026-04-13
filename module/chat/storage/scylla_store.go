@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
@@ -14,24 +15,25 @@ type scyllaStore struct {
 	session *gocql.Session
 }
 
+// NewScyllaStore creates a new ScyllaDB-backed message store.
 func NewScyllaStore(session *gocql.Session) *scyllaStore {
 	return &scyllaStore{session: session}
 }
 
+// InsertMessage persists a message to ScyllaDB.
+// It generates the MessageID (TimeUUID) and CreatedAt timestamp,
+// writing them back into the msg struct for downstream consumers.
 func (s *scyllaStore) InsertMessage(ctx context.Context, msg *model.Message) error {
-	log.Printf("Inserting message to Scylla: %+v", msg)
-
 	convID, err := gocql.ParseUUID(msg.ConversationID)
 	if err != nil {
-		log.Printf("[ScyllaDB Error] Failed to parse conversation_id to UUID: %v", err)
-		return err
+		return fmt.Errorf("parse conversation_id %q to UUID: %w", msg.ConversationID, err)
 	}
 
 	msgID := gocql.TimeUUID()
 	now := time.Now()
 
-	// Update the message model with the actual values used for insertion
-	// so that they reflect in downstream processes if needed.
+	// Write generated values back into the struct so that the caller
+	// (business layer) can use the actual persisted values for Centrifugo publish.
 	msg.MessageID = msgID.String()
 	msg.CreatedAt = now
 
@@ -41,10 +43,9 @@ func (s *scyllaStore) InsertMessage(ctx context.Context, msg *model.Message) err
 	`, convID, now, msgID, msg.SenderID, msg.ContentEncrypted, msg.IsRead)
 
 	if err := q.WithContext(ctx).Exec(); err != nil {
-		log.Printf("[ScyllaDB Error] Failed to execute INSERT INTO messages: %v", err)
-		return err
+		return fmt.Errorf("insert message into ScyllaDB: %w", err)
 	}
 
-	log.Printf("[ScyllaDB Success] Message %s inserted successfully", msgID.String())
+	log.Printf("[ScyllaDB] Message %s inserted for conversation %s", msgID.String(), msg.ConversationID)
 	return nil
 }

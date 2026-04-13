@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="CopilotDiffPersistence">
+    <option name="pendingDiffs">
+      <map>
+        <entry key="/Dockerfile (snapshot)">
+          <value>
+            <PendingDiffInfo>
+              <option name="filePath" value="/Dockerfile (snapshot)" />
+              <option name="originalContent" value="# Build stage&#10;FROM golang:1.25-alpine AS builder&#10;&#10;WORKDIR /app&#10;&#10;COPY go.mod go.sum ./&#10;&#10;RUN go mod download&#10;&#10;COPY . .&#10;&#10;# Building app&#10;RUN cd cmd/chat &amp;&amp; go build -o server&#10;&#10;FROM alpine:3.18&#10;&#10;RUN apk update &amp;&amp; apk add --no-cache tzdata&#10;COPY --from=builder /app/cmd/chat/server /app/&#10;COPY ./config/config.yaml /app/config/config.yaml&#10;&#10;ENV ENV_CONFIG_ONLY=true&#10;&#10;WORKDIR /app&#10;&#10;EXPOSE 8080&#10;ENV GIN_MODE=release&#10;&#10;# Run the web service on container startup.&#10;CMD [&quot;/app/server&quot;]" />
+              <option name="updatedContent" value="# Build stage&#10;FROM golang:1.25-alpine AS builder&#10;&#10;WORKDIR /app&#10;&#10;COPY go.mod go.sum ./&#10;&#10;RUN go mod download&#10;&#10;COPY . .&#10;&#10;# Building app&#10;RUN cd cmd/chat &amp;&amp; go build -o server .&#10;&#10;FROM alpine:3.18&#10;&#10;RUN apk update &amp;&amp; apk add --no-cache tzdata&#10;COPY --from=builder /app/cmd/chat/server /app/&#10;COPY ./config/config.yaml /app/config/config.yaml&#10;&#10;ENV ENV_CONFIG_ONLY=true&#10;&#10;WORKDIR /app&#10;&#10;EXPOSE 8080&#10;ENV GIN_MODE=release&#10;&#10;# Run the web service on container startup.&#10;CMD [&quot;/app/server&quot;]" />
+            </PendingDiffInfo>
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+</project>
