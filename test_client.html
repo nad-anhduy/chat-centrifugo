@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Centrifugo Chat Tester</title>
+    <script src="https://unpkg.com/centrifuge@5.0.1/dist/centrifuge.js"></script>
+    <style>
+        :root {
+            --primary: #4f46e5;
+            --primary-hover: #4338ca;
+            --bg: #f3f4f6;
+            --card-bg: #ffffff;
+            --text-main: #1f2937;
+            --text-muted: #6b7280;
+            --border: #e5e7eb;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg);
+            color: var(--text-main);
+            margin: 0;
+            padding: 2rem;
+            display: flex;
+            justify-content: center;
+        }
+
+        .container {
+            background-color: var(--card-bg);
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+            width: 100%;
+            max-width: 600px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            height: 80vh;
+        }
+
+        .header {
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border);
+            background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
+            color: white;
+        }
+
+        .header h1 {
+            margin: 0;
+            font-size: 1.5rem;
+        }
+
+        .header p {
+            margin: 0.5rem 0 0 0;
+            font-size: 0.875rem;
+            opacity: 0.9;
+        }
+
+        .setup-panel {
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        label {
+            font-size: 0.875rem;
+            font-weight: 500;
+        }
+
+        input {
+            padding: 0.75rem;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            font-size: 1rem;
+            transition: border-color 0.2s;
+            outline: none;
+        }
+
+        input:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.1);
+        }
+
+        button {
+            padding: 0.75rem 1.5rem;
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 1rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        button:hover {
+            background-color: var(--primary-hover);
+        }
+
+        button:disabled {
+            background-color: var(--text-muted);
+            cursor: not-allowed;
+            opacity: 0.7;
+        }
+
+        .messages-container {
+            flex: 1;
+            padding: 1.5rem;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+            background-color: #f9fafb;
+        }
+
+        .message-row {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .message-bubble {
+            padding: 0.75rem 1rem;
+            border-radius: 8px;
+            max-width: 85%;
+            word-break: break-word;
+            font-size: 0.95rem;
+            line-height: 1.4;
+        }
+
+        .system-message .message-bubble {
+            background-color: #fffbeb;
+            color: #92400e;
+            border: 1px solid #fde68a;
+            align-self: center;
+            font-size: 0.85rem;
+            padding: 0.5rem 1rem;
+        }
+
+        .chat-message.received .message-bubble {
+            background-color: white;
+            border: 1px solid var(--border);
+            align-self: flex-start;
+            border-bottom-left-radius: 2px;
+        }
+
+        .chat-message.sent .message-bubble {
+            background-color: #e0e7ff;
+            color: #3730a3;
+            align-self: flex-end;
+            border-bottom-right-radius: 2px;
+        }
+
+        .time-label {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            margin-top: 0.25rem;
+            text-align: right;
+        }
+
+        .chat-panel {
+            padding: 1.5rem;
+            border-top: 1px solid var(--border);
+            display: flex;
+            gap: 0.5rem;
+            background-color: white;
+        }
+
+        .chat-panel input {
+            flex: 1;
+        }
+
+        /* Status indicator */
+        .status-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: #ef4444; /* red */
+            margin-right: 6px;
+        }
+        .status-dot.connected {
+            background-color: #10b981; /* green */
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1><span class="status-dot" id="statusDot"></span>Centrifugo Web Client</h1>
+            <p>Connect. Subscribe. Publish.</p>
+        </div>
+
+        <div class="setup-panel">
+            <div class="form-group">
+                <label for="token">User Connection Token (JWT)</label>
+                <input type="text" id="token" placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...">
+            </div>
+            <div class="form-group">
+                <label for="conversationId">Conversation ID (UUID)</label>
+                <input type="text" id="conversationId" placeholder="a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11" value="a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11">
+            </div>
+            <div class="form-group">
+                <label for="channel">Channel Name (auto-filled from Conversation ID)</label>
+                <input type="text" id="channel" placeholder="chat:a0eebc99-..." value="chat:a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11" readonly>
+            </div>
+            <button id="connectBtn">Connect & Subscribe</button>
+        </div>
+
+        <div class="messages-container" id="messagesStr">
+            <!-- Messages will appear here -->
+        </div>
+
+        <div class="chat-panel">
+            <input type="text" id="messageInput" placeholder="Type a message..." disabled>
+            <button id="sendBtn" disabled>Send</button>
+        </div>
+    </div>
+
+    <script>
+        let centrifuge = null;
+        let sub = null;
+
+        // Elements
+        const tokenInput = document.getElementById('token');
+        const conversationIdInput = document.getElementById('conversationId');
+        const channelInput = document.getElementById('channel');
+        const connectBtn = document.getElementById('connectBtn');
+        const messagesContainer = document.getElementById('messagesStr');
+        const messageInput = document.getElementById('messageInput');
+        const sendBtn = document.getElementById('sendBtn');
+        const statusDot = document.getElementById('statusDot');
+
+        // Auto-sync channel name from conversation ID
+        conversationIdInput.addEventListener('input', function() {
+            channelInput.value = 'chat:' + this.value.trim();
+        });
+
+        function getCurrentTime() {
+            const now = new Date();
+            return now.getHours().toString().padStart(2, '0') + ':' + now.getMinutes().toString().padStart(2, '0');
+        }
+
+        function appendSystemMessage(text) {
+            const row = document.createElement('div');
+            row.className = 'message-row system-message';
+            row.innerHTML = `<div class="message-bubble">${text}</div>`;
+            messagesContainer.appendChild(row);
+            scrollToBottom();
+        }
+
+        function appendChatMessage(data, isSent = false) {
+            const row = document.createElement('div');
+            row.className = `message-row chat-message ${isSent ? 'sent' : 'received'}`;
+            
+            // Format data appropriately
+            let content = typeof data === 'object' ? JSON.stringify(data) : data;
+            
+            row.innerHTML = `
+                <div class="message-bubble">
+                    ${content}
+                    <div class="time-label">${getCurrentTime()}</div>
+                </div>
+            `;
+            messagesContainer.appendChild(row);
+            scrollToBottom();
+        }
+
+        function scrollToBottom() {
+            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        }
+
+        function toggleChatInputs(enabled) {
+            messageInput.disabled = !enabled;
+            sendBtn.disabled = !enabled;
+        }
+
+        connectBtn.addEventListener('click', () => {
+            const token = tokenInput.value.trim();
+            const channel = channelInput.value.trim();
+            
+            if (!channel) {
+                alert("Please enter a Conversation ID");
+                return;
+            }
+            
+            // Disconnect existing
+            if (centrifuge) {
+                centrifuge.disconnect();
+                if (sub) {
+                    sub.removeAllListeners();
+                }
+            }
+            
+            messagesContainer.innerHTML = ''; // clear history
+            
+            // Initialize Centrifugo Client
+            centrifuge = new Centrifuge("ws://localhost:8000/connection/websocket", {
+                token: token
+            });
+            
+            // Client Events
+            centrifuge.on('connecting', function (ctx) {
+                appendSystemMessage(`Connecting to server...`);
+                statusDot.classList.remove('connected');
+                toggleChatInputs(false);
+            }).on('connected', function (ctx) {
+                appendSystemMessage(`Connected over ${ctx.transport}`);
+                statusDot.classList.add('connected');
+            }).on('disconnected', function (ctx) {
+                appendSystemMessage(`Disconnected: ${ctx.reason}`);
+                statusDot.classList.remove('connected');
+                toggleChatInputs(false);
+            }).connect();
+            
+            // Setup Subscription
+            sub = centrifuge.newSubscription(channel);
+            
+            // Subscription Events
+            sub.on('publication', function (ctx) {
+                appendChatMessage(ctx.data, false);
+            }).on('subscribing', function (ctx) {
+                appendSystemMessage(`Subscribing to channel '${channel}'...`);
+            }).on('subscribed', function (ctx) {
+                appendSystemMessage(`Successfully subscribed to '${channel}'`);
+                toggleChatInputs(true);
+            }).on('unsubscribed', function (ctx) {
+                appendSystemMessage(`Unsubscribed from '${channel}': ${ctx.reason}`);
+                toggleChatInputs(false);
+            }).on('error', function (ctx) {
+                appendSystemMessage(`Subscription Error: ${ctx.error.message}`);
+                console.error('Subscription error', ctx);
+            }).subscribe();
+            
+            connectBtn.textContent = 'Reconnect';
+        });
+
+        // Send message via Backend REST API → ScyllaDB + Centrifugo publish
+        async function sendMessage() {
+            const text = messageInput.value.trim();
+            if (!text) return;
+
+            const token = tokenInput.value.trim();
+            const conversationId = conversationIdInput.value.trim();
+
+            if (!conversationId) {
+                appendSystemMessage('Error: Conversation ID is required.');
+                return;
+            }
+
+            try {
+                const res = await fetch('http://localhost:8080/api/v1/chat/messages', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': 'Bearer ' + token
+                    },
+                    body: JSON.stringify({
+                        conversation_id: conversationId,
+                        content_encrypted: text
+                    })
+                });
+
+                if (!res.ok) {
+                    const errBody = await res.json().catch(() => ({}));
+                    appendSystemMessage(`Send failed (${res.status}): ${errBody.error || res.statusText}`);
+                    return;
+                }
+
+                appendChatMessage({ content_encrypted: text }, true);
+                messageInput.value = '';
+            } catch (err) {
+                appendSystemMessage(`Network error: ${err.message}`);
+                console.error('Send message error:', err);
+            }
+        }
+
+        sendBtn.addEventListener('click', sendMessage);
+        messageInput.addEventListener('keypress', function (e) {
+            if (e.key === 'Enter') {
+                sendMessage();
+            }
+        });
+    </script>
+</body>
+</html>
