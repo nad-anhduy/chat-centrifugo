@@ -32,6 +32,25 @@ func (m *mockPublisher) PublishMessage(ctx context.Context, channel string, data
 	return nil
 }
 
+// mockPresenceStore is a no-op PresenceStorage for integration tests
+// that do not exercise the presence feature.
+type mockPresenceStore struct{}
+
+func (m *mockPresenceStore) SetOnline(_ context.Context, _ string, _ time.Duration) error {
+	return nil
+}
+func (m *mockPresenceStore) SetOffline(_ context.Context, _ string) error { return nil }
+func (m *mockPresenceStore) GetPresence(_ context.Context, userID string) (*model.PresenceInfo, error) {
+	return &model.PresenceInfo{UserID: userID, Status: model.PresenceStatusOffline}, nil
+}
+func (m *mockPresenceStore) GetBulkPresence(_ context.Context, userIDs []string) ([]model.PresenceInfo, error) {
+	result := make([]model.PresenceInfo, len(userIDs))
+	for i, id := range userIDs {
+		result[i] = model.PresenceInfo{UserID: id, Status: model.PresenceStatusOffline}
+	}
+	return result, nil
+}
+
 // setupTestDB connects to the running local Docker containers (Postgres & ScyllaDB)
 func setupTestDB(t *testing.T) (*gorm.DB, *gocql.Session) {
 	// 1. Setup Postgres
@@ -77,21 +96,24 @@ func TestChatServiceIntegration(t *testing.T) {
 	mockPub := &mockPublisher{}
 
 	jwtSecret := "TEST_SECRET"
+	mockPresence := &mockPresenceStore{}
 
 	// Init Business layers — postgresStore satisfies both ConversationStorage and UserStorage
 	authBiz := business.NewAuthBusiness(postgresStore, jwtSecret)
-	chatBiz := business.NewChatBusiness(scyllaStore, mockPub, postgresStore, postgresStore)
+	chatBiz := business.NewChatBusiness(scyllaStore, mockPub, postgresStore, postgresStore, mockPresence, 0)
 
 	// Init Handlers
 	authHandler := ginchat.NewAuthHandler(authBiz)
 	chatHandler := ginchat.NewChatHandler(chatBiz)
 	convHandler := ginchat.NewConversationHandler(chatBiz)
 	userHandler := ginchat.NewUserHandler(chatBiz)
+	presenceHandler := ginchat.NewPresenceHandler(chatBiz)
+	webhookHandler := ginchat.NewWebhookHandler(chatBiz)
 
 	// Setup Gin
 	gin.SetMode(gin.TestMode)
 	r := gin.Default()
-	routes.SetupRoutes(r, authHandler, chatHandler, convHandler, userHandler, jwtSecret)
+	routes.SetupRoutes(r, authHandler, chatHandler, convHandler, userHandler, presenceHandler, webhookHandler, jwtSecret)
 
 	var token string
 	var userID string

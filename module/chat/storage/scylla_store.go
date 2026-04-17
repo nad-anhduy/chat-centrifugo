@@ -49,3 +49,67 @@ func (s *scyllaStore) InsertMessage(ctx context.Context, msg *model.Message) err
 	log.Printf("[ScyllaDB] Message %s inserted for conversation %s", msgID.String(), msg.ConversationID)
 	return nil
 }
+
+// GetMessages retrieves paginated messages for a conversation from ScyllaDB.
+// If beforeTS is zero, it returns the latest messages (first page).
+// Results are ordered by created_at DESC, limited to 'limit' items.
+func (s *scyllaStore) GetMessages(ctx context.Context, conversationID string, beforeTS time.Time, limit int) ([]model.Message, error) {
+	convID, err := gocql.ParseUUID(conversationID)
+	if err != nil {
+		return nil, fmt.Errorf("parse conversation_id %q to UUID: %w", conversationID, err)
+	}
+
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+
+	var query *gocql.Query
+	if beforeTS.IsZero() {
+		// First page: get latest messages
+		query = s.session.Query(`
+			SELECT conversation_id, created_at, message_id, sender_id, content_encrypted, is_read
+			FROM messages
+			WHERE conversation_id = ?
+			ORDER BY created_at DESC
+			LIMIT ?
+		`, convID, limit)
+	} else {
+		// Subsequent pages: get messages before the given timestamp
+		query = s.session.Query(`
+			SELECT conversation_id, created_at, message_id, sender_id, content_encrypted, is_read
+			FROM messages
+			WHERE conversation_id = ? AND created_at < ?
+			ORDER BY created_at DESC
+			LIMIT ?
+		`, convID, beforeTS, limit)
+	}
+
+	iter := query.WithContext(ctx).Iter()
+	var messages []model.Message
+
+	var (
+		cID       gocql.UUID
+		createdAt time.Time
+		msgID     gocql.UUID
+		senderID  string
+		content   string
+		isRead    bool
+	)
+
+	for iter.Scan(&cID, &createdAt, &msgID, &senderID, &content, &isRead) {
+		messages = append(messages, model.Message{
+			ConversationID:   cID.String(),
+			CreatedAt:        createdAt,
+			MessageID:        msgID.String(),
+			SenderID:         senderID,
+			ContentEncrypted: content,
+			IsRead:           isRead,
+		})
+	}
+
+	if err := iter.Close(); err != nil {
+		return nil, fmt.Errorf("query messages for conversation %q: %w", conversationID, err)
+	}
+
+	return messages, nil
+}

@@ -2,6 +2,7 @@ POSTGRES_DSN: "host=postgres user=admin password=admin dbname=chat_db port=5432 
 SCYLLA_HOSTS: "scylladb"
 SCYLLA_KEYSPACE: "chat_logs"
 REDIS_URL: "redis://redis:6379/0"
+REDIS_PRESENCE_TTL: "5m"
 CENTRIFUGO_API_URL: "http://centrifugo:8000/api"
 CENTRIFUGO_API_KEY: "SECRET_KEY"
 JWT_SECRET: "SECRET_KEY"

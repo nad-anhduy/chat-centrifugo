@@ -9,6 +9,7 @@ import (
 	"github.com/centrifugal/gocent/v3"
 	"github.com/gin-gonic/gin"
 	"github.com/gocql/gocql"
+	"github.com/redis/go-redis/v9"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
@@ -38,7 +39,7 @@ func main() {
 		log.Fatalf("failed to connect to postgres: %v", err)
 	}
 
-	err = db.AutoMigrate(&model.User{}, &model.Conversation{}, &model.Participant{})
+	err = db.AutoMigrate(&model.User{}, &model.Conversation{}, &model.Participant{}, &model.Friendship{})
 	if err != nil {
 		log.Fatalf("failed to auto migrate postgres: %v", err)
 	}
@@ -74,28 +75,50 @@ func main() {
 	}
 	defer session.Close()
 
-	// 3. Setup Centrifugo
+	// 3. Setup Redis
+	redisOpts, err := redis.ParseURL(cfg.RedisURL)
+	if err != nil {
+		log.Fatalf("failed to parse redis URL: %v", err)
+	}
+	redisClient := redis.NewClient(redisOpts)
+
+	// Parse presence TTL from config (default: 5m).
+	presenceTTL := 5 * time.Minute
+	if cfg.RedisPresenceTTL != "" {
+		parsed, err := time.ParseDuration(cfg.RedisPresenceTTL)
+		if err != nil {
+			log.Fatalf("invalid REDIS_PRESENCE_TTL %q: %v", cfg.RedisPresenceTTL, err)
+		}
+		presenceTTL = parsed
+	}
+
+	// 4. Setup Centrifugo
 	c := gocent.New(gocent.Config{
 		Addr: cfg.CentrifugoAPI,
 		Key:  cfg.CentrifugoKey,
 	})
 
-	// 4. Initialize Repositories (Dependencies)
+	// 5. Initialize Repositories (Dependencies)
 	postgresStore := storage.NewPostgresStore(db)
 	scyllaStore := storage.NewScyllaStore(session)
+	redisStore := storage.NewRedisStore(redisClient)
 	publisher := centrifugo.NewPublisher(c)
 
-	// 5. Initialize Services (Business Layer)
+	// 6. Initialize Services (Business Layer)
 	authBiz := business.NewAuthBusiness(postgresStore, cfg.JWTSecret)
-	chatBiz := business.NewChatBusiness(scyllaStore, publisher, postgresStore, postgresStore)
+	chatBiz := business.NewChatBusiness(scyllaStore, publisher, postgresStore, postgresStore, redisStore, presenceTTL)
+	friendBiz := business.NewFriendshipBusiness(postgresStore, postgresStore, postgresStore, publisher)
 
-	// 6. Initialize Handlers (Transport Layer)
+	// 7. Initialize Handlers (Transport Layer)
 	authHandler := ginchat.NewAuthHandler(authBiz)
 	chatHandler := ginchat.NewChatHandler(chatBiz)
 	convHandler := ginchat.NewConversationHandler(chatBiz)
-	userHandler := ginchat.NewUserHandler(chatBiz)
+	userHandler := ginchat.NewUserHandler(chatBiz, friendBiz)
+	friendHandler := ginchat.NewFriendshipHandler(friendBiz)
+	presenceHandler := ginchat.NewPresenceHandler(chatBiz)
+	webhookHandler := ginchat.NewWebhookHandler(chatBiz)
 
-	// 7. Setup Gin routing
+	// 8. Setup Gin routing
 	r := gin.Default()
 
 	// CORS middleware for test_client.html (browser cross-origin requests)
@@ -110,11 +133,11 @@ func main() {
 		c.Next()
 	})
 
-	routes.SetupRoutes(r, authHandler, chatHandler, convHandler, userHandler, cfg.JWTSecret)
+	routes.SetupRoutes(r, authHandler, chatHandler, convHandler, userHandler, presenceHandler, webhookHandler, friendHandler, cfg.JWTSecret)
 
 	routes.RegisterHealthCheck(r, db, session, c)
 
-	// 8. Start server
+	// 9. Start server
 	port := cfg.Port
 	if port == "" {
 		port = "8080"

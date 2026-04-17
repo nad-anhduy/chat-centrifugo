@@ -3,9 +3,19 @@
   "api_key": "SECRET_KEY",
   "allowed_origins": ["*"],
   "engine": "redis",
-  "redis": {
-    "address": "redis:6379"
-  },
+  "proxies": [
+    {
+      "name": "connect",
+      "endpoint": "http://chat-service:8080/api/v1/centrifugo/connect",
+      "timeout": "3s"
+    },
+    {
+      "name": "disconnect",
+      "endpoint": "http://chat-service:8080/api/v1/centrifugo/disconnect",
+      "timeout": "3s"
+    }
+  ],
+
   "namespaces": [
     {
       "name": "chat",
@@ -13,8 +23,14 @@
       "allow_publish_for_client": true,
       "presence": true,
       "history_size": 100,
-      "history_ttl": "24h",
-      "publish": true
+      "history_ttl": "24h"
+    },
+    {
+      "name": "user",
+      "allow_subscribe_for_client": true,
+      "allow_publish_for_client": false,
+      "presence": false,
+      "history_size": 0
     }
   ]
 }

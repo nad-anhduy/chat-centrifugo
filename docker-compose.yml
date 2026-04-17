@@ -91,7 +91,7 @@ services:
     volumes:
       - ./centrifugo_config.json:/centrifugo/config.json
     environment:
-      - CENTRIFUGO_REDIS_ADDRESS=redis:6379 
+      - CENTRIFUGO_REDIS_ADDRESS=redis:6379
       - CENTRIFUGO_ENGINE=redis
     depends_on:
       redis:

@@ -12,10 +12,12 @@ import (
 
 // ChatBusiness encapsulates the core messaging and conversation use cases.
 type ChatBusiness struct {
-	msgStore  MessageStorage
-	publisher MessagePublisher
-	convStore ConversationStorage
-	userStore UserStorage
+	msgStore      MessageStorage
+	publisher     MessagePublisher
+	convStore     ConversationStorage
+	userStore     UserStorage
+	presenceStore PresenceStorage
+	presenceTTL   time.Duration
 }
 
 // NewChatBusiness creates a new ChatBusiness with all required dependencies.
@@ -24,12 +26,16 @@ func NewChatBusiness(
 	publisher MessagePublisher,
 	convStore ConversationStorage,
 	userStore UserStorage,
+	presenceStore PresenceStorage,
+	presenceTTL time.Duration,
 ) *ChatBusiness {
 	return &ChatBusiness{
-		msgStore:  msgStore,
-		publisher: publisher,
-		convStore: convStore,
-		userStore: userStore,
+		msgStore:      msgStore,
+		publisher:     publisher,
+		convStore:     convStore,
+		userStore:     userStore,
+		presenceStore: presenceStore,
+		presenceTTL:   presenceTTL,
 	}
 }
 
@@ -153,12 +159,92 @@ func (biz *ChatBusiness) CreateGroupConversation(ctx context.Context, creatorID 
 }
 
 // GetConversationsByUserID returns all conversations the user is a participant of.
-func (biz *ChatBusiness) GetConversationsByUserID(ctx context.Context, userID string) ([]model.Conversation, error) {
-	conversations, err := biz.convStore.GetConversationsByUserID(ctx, userID)
+func (biz *ChatBusiness) GetConversationsByUserID(ctx context.Context, userID string) ([]dto.ConversationDetail, error) {
+	details, err := biz.convStore.GetDetailedConversations(ctx, userID)
 	if err != nil {
-		return nil, fmt.Errorf("get conversations for user %q: %w", userID, err)
+		return nil, fmt.Errorf("get detailed conversations for user %q: %w", userID, err)
 	}
-	return conversations, nil
+	return details, nil
+}
+
+// --- Message History ---
+
+// GetMessages retrieves paginated message history for a conversation.
+// If beforeTS is zero, it returns the latest messages.
+func (biz *ChatBusiness) GetMessages(ctx context.Context, conversationID string, beforeTS time.Time, limit int) ([]model.Message, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+
+	messages, err := biz.msgStore.GetMessages(ctx, conversationID, beforeTS, limit)
+	if err != nil {
+		return nil, fmt.Errorf("get messages for conversation %q: %w", conversationID, err)
+	}
+
+	return messages, nil
+}
+
+// --- Presence Management ---
+
+// SetUserOnline marks a user as online and broadcasts the status to their chat partners.
+func (biz *ChatBusiness) SetUserOnline(ctx context.Context, userID string) error {
+	if err := biz.presenceStore.SetOnline(ctx, userID, biz.presenceTTL); err != nil {
+		return fmt.Errorf("set user %q online: %w", userID, err)
+	}
+
+	biz.broadcastPresence(ctx, userID, model.PresenceStatusOnline)
+	return nil
+}
+
+// SetUserOffline marks a user as offline and broadcasts the status to their chat partners.
+func (biz *ChatBusiness) SetUserOffline(ctx context.Context, userID string) error {
+	if err := biz.presenceStore.SetOffline(ctx, userID); err != nil {
+		return fmt.Errorf("set user %q offline: %w", userID, err)
+	}
+
+	biz.broadcastPresence(ctx, userID, model.PresenceStatusOffline)
+	return nil
+}
+
+// RefreshPresence refreshes the heartbeat TTL for an online user.
+func (biz *ChatBusiness) RefreshPresence(ctx context.Context, userID string) error {
+	if err := biz.presenceStore.SetOnline(ctx, userID, biz.presenceTTL); err != nil {
+		return fmt.Errorf("refresh presence for user %q: %w", userID, err)
+	}
+	return nil
+}
+
+// GetBulkPresence retrieves presence status for multiple users.
+func (biz *ChatBusiness) GetBulkPresence(ctx context.Context, userIDs []string) ([]model.PresenceInfo, error) {
+	presences, err := biz.presenceStore.GetBulkPresence(ctx, userIDs)
+	if err != nil {
+		return nil, fmt.Errorf("get bulk presence: %w", err)
+	}
+	return presences, nil
+}
+
+// broadcastPresence publishes a presence update to all conversation channels
+// the user participates in, so co-participants receive real-time status updates.
+func (biz *ChatBusiness) broadcastPresence(ctx context.Context, userID string, status model.PresenceStatus) {
+	convIDs, err := biz.convStore.GetConversationIDsByUserID(ctx, userID)
+	if err != nil {
+		log.Printf("[WARN] failed to get conversations for presence broadcast of user %s: %v", userID, err)
+		return
+	}
+
+	payload := &dto.PresenceUpdate{
+		Type:     "presence_update",
+		UserID:   userID,
+		Status:   status,
+		LastSeen: time.Now(),
+	}
+
+	for _, convID := range convIDs {
+		channel := fmt.Sprintf("chat:%s", convID)
+		if err := biz.publisher.PublishMessage(ctx, channel, payload); err != nil {
+			log.Printf("[WARN] failed to broadcast presence to channel %s: %v", channel, err)
+		}
+	}
 }
 
 // uniqueStrings removes duplicate strings while preserving order.

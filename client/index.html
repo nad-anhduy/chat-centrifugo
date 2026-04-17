@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Centrifugo E2EE Chat</title>
+    <link rel="stylesheet" href="css/style.css">
+    <!-- JSEncrypt for RSA E2EE -->
+    <script src="https://unpkg.com/jsencrypt@3.3.2/bin/jsencrypt.min.js"></script>
+    <!-- Centrifuge WS Client -->
+    <script src="https://unpkg.com/centrifuge@5.0.1/dist/centrifuge.js"></script>
+</head>
+<body>
+
+    <!-- AUTH OVERLAY -->
+    <div id="auth-overlay">
+        <div class="auth-card">
+            <h1 class="auth-title">✨ SecureChat</h1>
+            <input type="text" id="auth-username" class="auth-input" placeholder="Username (e.g. alice)">
+            <input type="password" id="auth-password" class="auth-input" placeholder="Password">
+            <button id="btn-login" class="auth-btn">Login</button>
+            <div class="auth-divider">or</div>
+            <button id="btn-register" class="auth-btn auth-btn-outline">Create new account</button>
+            <p id="auth-msg" style="color: var(--danger); font-size: 0.8rem; margin-top: 10px;"></p>
+        </div>
+    </div>
+
+    <!-- MAIN APP CONTAINER -->
+    <div id="app-container">
+        
+        <!-- SIDEBAR -->
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <div class="user-profile">
+                    <div class="avatar-placeholder" id="my-avatar">U</div>
+                    <div class="user-info">
+                        <h2 id="my-name">Username</h2>
+                        <p><span>🟢</span> Online</p>
+                    </div>
+                </div>
+            </div>
+            
+            <div style="padding: 10px 1.5rem;">
+                <div style="position: relative; display: flex; gap: 5px;">
+                    <input type="text" id="search-input" placeholder="Search users by username..." class="auth-input" style="flex: 1; padding: 8px; font-size: 0.85rem;">
+                    <button id="btn-friends-pending" title="Pending Requests" style="background:var(--bg-card); border:1px solid var(--border); border-radius: 4px; padding: 0 10px; cursor: pointer; color: var(--text);">🔔</button>
+                    <!-- Search Results Dropdown -->
+                    <div id="search-results" style="display: none; position: absolute; top: 100%; left: 0; right: 0; background: var(--bg-card); border: 1px solid var(--border); border-radius: 4px; z-index: 10; max-height: 200px; overflow-y: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">
+                        <!-- populated via JS -->
+                    </div>
+                </div>
+            </div>
+
+            <div id="friend-requests-section" style="display: none; padding: 0.5rem 1.5rem; border-bottom: 1px solid var(--border-light);">
+                <h3 style="font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; margin-bottom: 0.75rem;">Friend Requests</h3>
+                <div id="friend-requests-list" style="display: flex; flex-direction: column; gap: 10px;">
+                    <!-- Populated via JS -->
+                </div>
+            </div>
+
+            <div style="padding: 0.5rem 1.5rem; display: flex; justify-content: space-between; align-items: center;">
+                <h3 style="font-size: 0.8rem; color: var(--text-muted); text-transform: uppercase;">Conversations</h3>
+                <button id="btn-new-chat" style="background:none; border:none; color: var(--primary); font-size: 1.2rem; cursor: pointer;">+</button>
+            </div>
+
+            <div class="conv-list" id="conv-list">
+                <!-- Conversation items populated via JS -->
+            </div>
+        </div>
+
+        <!-- CHAT AREA -->
+        <div class="chat-area">
+            
+            <!-- Default Empty State -->
+            <div id="chat-empty" class="chat-empty">
+                <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="var(--border)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                </svg>
+                <h2 style="margin-top: 1rem; color: var(--border);">Select a conversation to start messaging</h2>
+            </div>
+
+            <!-- Active Chat View (Hidden by default) -->
+            <div id="chat-view" style="display: none; height: 100%; flex-direction: column;">
+                
+                <div class="chat-header">
+                    <div class="chat-header-info">
+                        <div class="avatar-placeholder" id="current-chat-avatar" style="width: 36px; height: 36px; font-size: 0.9rem;">G</div>
+                        <div>
+                            <h2 id="current-chat-name">Conversation Name</h2>
+                            <p id="current-chat-status">🟢 Online</p>
+                        </div>
+                    </div>
+                    <div style="font-size: 0.75rem; color: var(--success); display: flex; align-items: center; gap: 5px;">
+                        🔒 E2E Encrypted
+                    </div>
+                </div>
+
+                <div class="chat-messages" id="chat-messages">
+                    <div id="loading-history" class="loading-history hidden">Loading older messages...</div>
+                    <div id="messages-container" style="display: flex; flex-direction: column; gap: 10px; padding-bottom: 10px;">
+                        <!-- Messages go here -->
+                    </div>
+                </div>
+
+                <div class="chat-input-area">
+                    <div class="chat-input-wrapper">
+                        <input type="text" id="msg-input" placeholder="Type an encrypted message..." autocomplete="off">
+                    </div>
+                    <button class="send-btn" id="btn-send" disabled>
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="22" y1="2" x2="11" y2="13"></line>
+                            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                        </svg>
+                    </button>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <!-- CREATE CONVERSATION DIALOG -->
+    <div id="dialog-new-chat" class="dialog-overlay" style="display: none;">
+        <div class="dialog-box">
+            <h2 style="margin-bottom: 1rem; font-size: 1.2rem;">New Group Chat</h2>
+            <div style="margin-bottom: 1rem;">
+                <label style="display:block; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.5rem;">Group Name</label>
+                <input type="text" id="new-group-name" class="auth-input" placeholder="e.g. Secret Project">
+            </div>
+            <div style="margin-bottom: 1rem;">
+                <label style="display:block; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.5rem;">Member User IDs (comma separated)</label>
+                <input type="text" id="new-group-members" class="auth-input" placeholder="uuid-1, uuid-2">
+            </div>
+            <div style="display: flex; gap: 1rem; margin-top: 1.5rem;">
+                <button id="btn-cancel-group" class="auth-btn auth-btn-outline" style="flex:1;">Cancel</button>
+                <button id="btn-create-group" class="auth-btn" style="flex:1;">Create</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- PENDING REQUESTS DIALOG -->
+    <div id="dialog-pending" class="dialog-overlay" style="display: none;">
+        <div class="dialog-box" style="max-height: 80vh; display: flex; flex-direction: column;">
+            <h2 style="margin-bottom: 1rem; font-size: 1.2rem;">Pending Friend Requests</h2>
+            <div id="pending-list" style="flex: 1; overflow-y: auto; margin-bottom: 1rem; display: flex; flex-direction: column; gap: 10px;">
+                <!-- Populated via JS -->
+            </div>
+            <div style="display: flex; gap: 1rem;">
+                <button id="btn-close-pending" class="auth-btn auth-btn-outline" style="flex:1;">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- MAIN APP SCRIPTS -->
+    <script src="js/app.js"></script>
+</body>
+</html>

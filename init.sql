@@ -27,6 +27,23 @@ CREATE TABLE IF NOT EXISTS participants (
     PRIMARY KEY (conversation_id, user_id)
 );
 
--- Index để tối ưu query
+-- Single-column indexes for backward compatibility
 CREATE INDEX IF NOT EXISTS idx_participants_user_id ON participants(user_id);
 CREATE INDEX IF NOT EXISTS idx_participants_conversation_id ON participants(conversation_id);
+
+-- Composite index: speeds up "list all conversations for a user" JOIN query.
+-- The planner can resolve both user_id (filter) and conversation_id (output) from the index alone (index-only scan).
+CREATE INDEX IF NOT EXISTS idx_participants_user_conversation ON participants(user_id, conversation_id);
+
+CREATE TABLE IF NOT EXISTS friendships (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    requester_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    receiver_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    status VARCHAR(50) NOT NULL DEFAULT 'pending',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uni_friendships_users UNIQUE (requester_id, receiver_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_friendships_requester ON friendships(requester_id);
+CREATE INDEX IF NOT EXISTS idx_friendships_receiver ON friendships(receiver_id);

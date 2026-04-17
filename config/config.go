@@ -5,14 +5,15 @@ import (
 )
 
 type Config struct {
-	PostgresDSN    string `mapstructure:"POSTGRES_DSN"`
-	ScyllaHosts    string `mapstructure:"SCYLLA_HOSTS"`
-	ScyllaKeyspace string `mapstructure:"SCYLLA_KEYSPACE"`
-	RedisURL       string `mapstructure:"REDIS_URL"`
-	CentrifugoAPI  string `mapstructure:"CENTRIFUGO_API_URL"`
-	CentrifugoKey  string `mapstructure:"CENTRIFUGO_API_KEY"`
-	JWTSecret      string `mapstructure:"JWT_SECRET"`
-	Port           string `mapstructure:"PORT"`
+	PostgresDSN      string `mapstructure:"POSTGRES_DSN"`
+	ScyllaHosts      string `mapstructure:"SCYLLA_HOSTS"`
+	ScyllaKeyspace   string `mapstructure:"SCYLLA_KEYSPACE"`
+	RedisURL         string `mapstructure:"REDIS_URL"`
+	RedisPresenceTTL string `mapstructure:"REDIS_PRESENCE_TTL"`
+	CentrifugoAPI    string `mapstructure:"CENTRIFUGO_API_URL"`
+	CentrifugoKey    string `mapstructure:"CENTRIFUGO_API_KEY"`
+	JWTSecret        string `mapstructure:"JWT_SECRET"`
+	Port             string `mapstructure:"PORT"`
 }
 
 func LoadConfig(path string) (*Config, error) {
