@@ -1,7 +1,9 @@
 {
   "token_hmac_secret_key": "SECRET_KEY",
   "api_key": "SECRET_KEY",
-  "allowed_origins": ["*"],
+  "allowed_origins": [
+    "*"
+  ],
   "engine": "redis",
   "proxies": [
     {
@@ -15,13 +17,16 @@
       "timeout": "3s"
     }
   ],
-
   "namespaces": [
     {
       "name": "chat",
       "allow_subscribe_for_client": true,
       "allow_publish_for_client": true,
       "presence": true,
+      "allow_presence_for_subscriber": true,
+      "allow_presence_for_client": true,
+      "join_leave": true,
+      "force_push_join_leave": true,
       "history_size": 100,
       "history_ttl": "24h"
     },
@@ -30,6 +35,7 @@
       "allow_subscribe_for_client": true,
       "allow_publish_for_client": false,
       "presence": false,
+      "join_leave": true,
       "history_size": 0
     }
   ]

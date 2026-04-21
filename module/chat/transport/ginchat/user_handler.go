@@ -97,3 +97,22 @@ func (h *UserHandler) SearchUsers(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"data": res})
 }
+
+// GetMyKeys returns the current user's public key.
+// GET /api/v1/users/me/keys
+func (h *UserHandler) GetMyKeys(c *gin.Context) {
+	userID := c.GetString("user_id")
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	publicKey, err := h.chatBiz.GetUserPublicKey(c.Request.Context(), userID)
+	if err != nil {
+		// If key not found, it's not strictly an error, just return empty
+		c.JSON(http.StatusOK, gin.H{"data": gin.H{"public_key": ""}})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"public_key": publicKey}})
+}

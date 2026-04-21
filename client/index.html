@@ -7,6 +7,8 @@
     <link rel="stylesheet" href="css/style.css">
     <!-- JSEncrypt for RSA E2EE -->
     <script src="https://unpkg.com/jsencrypt@3.3.2/bin/jsencrypt.min.js"></script>
+    <!-- Tailwind CSS for utility classes -->
+    <script src="https://cdn.tailwindcss.com"></script>
     <!-- Centrifuge WS Client -->
     <script src="https://unpkg.com/centrifuge@5.0.1/dist/centrifuge.js"></script>
 </head>
@@ -34,7 +36,10 @@
                 <div class="user-profile">
                     <div class="avatar-placeholder" id="my-avatar">U</div>
                     <div class="user-info">
-                        <h2 id="my-name">Username</h2>
+                        <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                            <h2 id="my-name">Username</h2>
+                            <button id="btn-logout" title="Logout" style="background: none; border: none; color: var(--danger); cursor: pointer; font-size: 1.1rem; padding: 0 5px;">📤</button>
+                        </div>
                         <p><span>🟢</span> Online</p>
                     </div>
                 </div>

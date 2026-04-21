@@ -68,7 +68,12 @@ func (h *WebhookHandler) OnConnect(c *gin.Context) {
 	}
 
 	// Centrifugo expects a result object in the response.
-	c.JSON(http.StatusOK, gin.H{"result": gin.H{}})
+	// Explicitly returning the "user" field ensures Centrifugo maps the connection correctly.
+	c.JSON(http.StatusOK, gin.H{
+		"result": gin.H{
+			"user": userID,
+		},
+	})
 }
 
 // OnDisconnect handles Centrifugo disconnect proxy webhook.

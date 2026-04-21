@@ -103,9 +103,20 @@ func (s *postgresStore) GetDetailedConversations(ctx context.Context, userID str
 			return nil, fmt.Errorf("get participants for conversation %q: %w", conv.ID, err)
 		}
 
+		// For direct chats, we want to display the peer's name as the conversation name.
+		displayName := conv.Name
+		if conv.Type == model.ConversationTypeDirect {
+			for _, p := range participants {
+				if p.UserID != userID {
+					displayName = p.Username
+					break
+				}
+			}
+		}
+
 		details = append(details, dto.ConversationDetail{
 			ID:           conv.ID,
-			Name:         conv.Name,
+			Name:         displayName,
 			Type:         conv.Type,
 			Participants: participants,
 			CreatedAt:    conv.CreatedAt,

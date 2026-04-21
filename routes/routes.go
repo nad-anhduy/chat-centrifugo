@@ -49,6 +49,7 @@ func SetupRoutes(
 			users.POST("/heartbeat", presenceHandler.Heartbeat)
 
 			// Parameterized routes last
+			users.GET("/me/keys", userHandler.GetMyKeys)
 			users.PUT("/me/public-key", userHandler.UpdatePublicKey)
 			users.GET("/:id/public-key", userHandler.GetPublicKey)
 		}

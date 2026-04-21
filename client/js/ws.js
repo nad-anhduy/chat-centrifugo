@@ -38,7 +38,7 @@ export const ws = {
         const channel = `chat:${conversationId}`;
         
         // Don't subscribe twice
-        if (currentSubscriptions[channel]) return;
+        if (currentSubscriptions[channel]) return currentSubscriptions[channel];
 
         console.log("Subscribing to", channel);
         const sub = centrifuge.newSubscription(channel);
@@ -52,8 +52,24 @@ export const ws = {
             }
         });
 
+        // Handle join/leave for real-time presence
+        sub.on('join', function(ctx) {
+            console.log("User joined channel:", ctx.info.user);
+            if (callbacks.onPresence) {
+                callbacks.onPresence({ user_id: ctx.info.user, status: 'ONLINE', type: 'presence_update' });
+            }
+        });
+
+        sub.on('leave', function(ctx) {
+            console.log("User left channel:", ctx.info.user);
+            if (callbacks.onPresence) {
+                callbacks.onPresence({ user_id: ctx.info.user, status: 'OFFLINE', type: 'presence_update' });
+            }
+        });
+
         sub.subscribe();
         currentSubscriptions[channel] = sub;
+        return sub;
     },
 
     subscribeUserChannel: (userId) => {

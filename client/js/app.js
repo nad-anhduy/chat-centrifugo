@@ -22,8 +22,9 @@ const api = {
     },
     users: {
         updatePublicKey: (public_key) => apiRequest('/users/me/public-key', { method: 'PUT', body: JSON.stringify({ public_key }) }),
+        getMyKeys: () => apiRequest('/users/me/keys', { method: 'GET' }),
         getPublicKey: (userId) => apiRequest(`/users/${userId}/public-key`, { method: 'GET' }),
-        getPresence: (userIds) => apiRequest(`/users/presence?user_ids=${userIds.join(',')}`, { method: 'GET' }),
+        getPresence: (userIds) => apiRequest(`/users/presence?ids=${userIds.join(',')}`, { method: 'GET' }),
         search: (query) => apiRequest(`/users/search?q=${encodeURIComponent(query)}`, { method: 'GET' })
     },
     conversations: {
@@ -69,21 +70,31 @@ const e2e = {
     ensureKeyPair: async (userId) => {
         const stored = e2e.loadStoredKeys(userId);
         if (stored.publicPem && stored.privatePem) {
-            console.log("[E2EE] Existing keys found in localStorage for user:", userId);
-            return { publicKeyPem: stored.publicPem, privateKeyPem: stored.privatePem };
+            // Verify if keys are valid and matching
+            const testPlain = 'verify-key-' + Date.now();
+            const enc = e2e.encryptMessage(testPlain, stored.publicPem);
+            if (enc) {
+                const dec = e2e.decryptMessage(enc, stored.privatePem);
+                if (dec === testPlain) {
+                    console.log("[E2EE] Valid keys found in localStorage for user:", userId);
+                    return { publicKeyPem: stored.publicPem, privateKeyPem: stored.privatePem };
+                }
+            }
+            console.warn("[E2EE] Stored keys corrupt or invalid. Regenerating...");
+            e2e.clearStoredKeys(userId);
         }
-        
-        console.log("[E2EE] No keys found for user, generating new pair...");
+
+        console.log("[E2EE] Generating new RSA-2048 keys for user:", userId);
         const keys = e2e.generateKeys();
         e2e.storeKeys(userId, keys.publicKeyPem, keys.privateKeyPem);
-        
+
         try {
             await api.users.updatePublicKey(keys.publicKeyPem);
             console.log("[E2EE] New public key synced to server.");
         } catch (err) {
             console.error("[E2EE] Failed to sync new public key to server:", err);
         }
-        
+
         return keys;
     },
     getPublicKey: async (userId) => {
@@ -104,7 +115,7 @@ const e2e = {
         if (!publicKeyPem) return false;
         const encryptor = new window.JSEncrypt();
         encryptor.setPublicKey(publicKeyPem);
-        return encryptor.encrypt(plaintext); 
+        return encryptor.encrypt(plaintext);
     },
     decryptMessage: (ciphertext, privateKeyPem) => {
         if (!privateKeyPem) return false;
@@ -120,34 +131,78 @@ let centrifuge = null;
 let currentSubscriptions = {};
 let wsCallbacks = { onMessage: null, onPresence: null, onConnect: null, onDisconnect: null };
 
+// Wired from DOMContentLoaded so channel join/leave handlers (defined above setOnlineStatus) can update dots.
+const presenceBridge = {
+    applyPresence(_userId, _status, _specificConvId) { /* replaced on init */ }
+};
+
 const ws = {
     setCallbacks: (cb) => { wsCallbacks = { ...wsCallbacks, ...cb }; },
     connect: (token) => {
-        if (centrifuge) centrifuge.disconnect();
+        if (centrifuge) ws.disconnect();
+        console.log('Centrifugo initializing...');
         centrifuge = new window.Centrifuge(WS_BASE, { token });
         centrifuge.on('connecting', () => console.log('Centrifugo connecting...'))
-                 .on('connected', (ctx) => { console.log(`Centrifugo connected via ${ctx.transport}`); if (wsCallbacks.onConnect) wsCallbacks.onConnect(); })
-                 .on('disconnected', (ctx) => { console.log(`Centrifugo disconnected: ${ctx.reason}`); if (wsCallbacks.onDisconnect) wsCallbacks.onDisconnect(); })
-                 .connect();
+            .on('connected', (ctx) => { console.log(`Centrifugo connected via ${ctx.transport}`); if (wsCallbacks.onConnect) wsCallbacks.onConnect(); })
+            .on('disconnected', (ctx) => { console.log(`Centrifugo disconnected: ${ctx.reason}`); if (wsCallbacks.onDisconnect) wsCallbacks.onDisconnect(); })
+            .connect();
     },
     subscribe: (conversationId) => {
         const channel = `chat:${conversationId}`;
-        if (currentSubscriptions[channel]) return;
+        if (currentSubscriptions[channel]) return currentSubscriptions[channel];
         const sub = centrifuge.newSubscription(channel);
+
         sub.on('publication', function (ctx) {
             const data = ctx.data;
-            if (data.Type === 'presence_update') {
+            const msgType = data.type ?? data.Type;
+            if (msgType === 'presence_update') {
                 if (wsCallbacks.onPresence) wsCallbacks.onPresence(data);
             } else {
                 if (wsCallbacks.onMessage) wsCallbacks.onMessage(data);
             }
         });
+
+        // Optimization: Sync initial presence list when subscribed
+        sub.on('subscribed', function (ctx) {
+            console.log(`[Presence] Subscribed to ${channel}, syncing initial presence...`);
+            sub.presence().then(function (result) {
+                // Mapping: Result.clients contains connection infos keyed by client ID
+                for (let clientID in result.clients) {
+                    const info = result.clients[clientID];
+                    // Map Centrifugo user ID to UI status
+                    presenceBridge.applyPresence(info.user, 'ONLINE');
+                }
+                console.log("Current presence list updated");
+            }).catch(err => console.error("Presence fetch error:", err));
+        });
+
+        // Handle real-time join/leave events
+        sub.on('join', function (ctx) {
+            console.log(`[Presence] User joined ${channel}:`, ctx.info.user);
+            presenceBridge.applyPresence(ctx.info.user, 'ONLINE');
+        });
+        sub.on('leave', function (ctx) {
+            console.log(`[Presence] User left ${channel}:`, ctx.info.user);
+            presenceBridge.applyPresence(ctx.info.user, 'OFFLINE');
+        });
+
         sub.subscribe();
         currentSubscriptions[channel] = sub;
+        return sub;
+    },
+    getPresence: async (channel) => {
+        if (!centrifuge) return {};
+        try {
+            const resp = await centrifuge.presence(channel);
+            return resp.clients || {};
+        } catch (err) {
+            console.error("Failed to fetch presence for", channel, err);
+            return {};
+        }
     },
     subscribeUserChannel: (userId) => {
         const channel = `user:#${userId}`;
-        if (currentSubscriptions[channel]) return;
+        if (currentSubscriptions[channel]) return currentSubscriptions[channel];
         console.log('Subscribing to personal channel', channel);
         const sub = centrifuge.newSubscription(channel);
         sub.on('publication', function (ctx) {
@@ -155,10 +210,25 @@ const ws = {
         });
         sub.subscribe();
         currentSubscriptions[channel] = sub;
+        return sub;
     },
     disconnect: () => {
-        if (centrifuge) centrifuge.disconnect();
+        // Explicitly unsubscribe and remove listeners from each subscription
+        for (let channel in currentSubscriptions) {
+            const sub = currentSubscriptions[channel];
+            if (sub) {
+                sub.unsubscribe();
+                sub.removeAllListeners();
+            }
+        }
         currentSubscriptions = {};
+
+        if (centrifuge) {
+            centrifuge.disconnect();
+            centrifuge.removeAllListeners();
+            centrifuge = null;
+        }
+        console.log("Disconnected from Centrifugo");
     }
 };
 
@@ -166,7 +236,7 @@ const ws = {
 let currentUser = { id: null, username: null, keys: null };
 let currentConversationId = null;
 let conversationsObj = {};
-let highestMessageTimestamp = null; 
+let highestMessageTimestamp = null;
 let oldestMessageTimestamp = null;
 let isLoadingMore = false;
 
@@ -179,25 +249,25 @@ window.addEventListener('DOMContentLoaded', () => {
         btnLogin: document.getElementById('btn-login'),
         btnRegister: document.getElementById('btn-register'),
         authMsg: document.getElementById('auth-msg'),
-        
+
         appContainer: document.getElementById('app-container'),
         myAvatar: document.getElementById('my-avatar'),
         myName: document.getElementById('my-name'),
-        
+
         convList: document.getElementById('conv-list'),
-        
+
         chatEmpty: document.getElementById('chat-empty'),
         chatView: document.getElementById('chat-view'),
         chatName: document.getElementById('current-chat-name'),
         chatStatus: document.getElementById('current-chat-status'),
         chatAvatar: document.getElementById('current-chat-avatar'),
-        
+
         messagesContainer: document.getElementById('messages-container'),
         chatMessagesScroll: document.getElementById('chat-messages'),
-        
+
         msgInput: document.getElementById('msg-input'),
         btnSend: document.getElementById('btn-send'),
-        
+
         btnNewChat: document.getElementById('btn-new-chat'),
         dialogNewChat: document.getElementById('dialog-new-chat'),
         newGroupName: document.getElementById('new-group-name'),
@@ -212,18 +282,21 @@ window.addEventListener('DOMContentLoaded', () => {
         dialogPending: document.getElementById('dialog-pending'),
         pendingList: document.getElementById('pending-list'),
         btnClosePending: document.getElementById('btn-close-pending'),
-        
+
         loadingHistory: document.getElementById('loading-history'),
         // Friend Requests Section
         friendReqSection: document.getElementById('friend-requests-section'),
         friendReqList: document.getElementById('friend-requests-list'),
+
+        btnLogout: document.getElementById('btn-logout'),
     };
 
     // --- EVENT BINDINGS ---
     els.btnRegister.addEventListener('click', handleRegister);
     els.btnLogin.addEventListener('click', handleLogin);
+    els.btnLogout.addEventListener('click', handleLogout);
     els.btnSend.addEventListener('click', handleSend);
-    els.msgInput.addEventListener('keypress', (e) => { if(e.key === 'Enter') handleSend(); });
+    els.msgInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') handleSend(); });
     els.btnNewChat.addEventListener('click', () => els.dialogNewChat.classList.add('active'));
     els.btnCancelGroup.addEventListener('click', () => els.dialogNewChat.classList.remove('active'));
     els.btnCreateGroup.addEventListener('click', handleCreateGroup);
@@ -273,21 +346,21 @@ window.addEventListener('DOMContentLoaded', () => {
         const user = els.usernameInp.value.trim();
         const pass = els.passwordInp.value.trim();
         if (!user || !pass) return showAuthError("Username & Password required");
-        
+
         try {
             els.btnRegister.disabled = true;
             els.btnRegister.textContent = "Generating keys...";
-            
+
             let keys = e2e.generateKeys();
             await api.auth.register(user, pass, keys.publicKeyPem);
-            
+
             // Note: We don't store keys during registration to ensure the login flow 
             // is the source of truth for current logged-in user context.
-            
+
             showAuthError("Registered successfully! Please login.");
             els.btnRegister.textContent = "Create new account";
             els.btnRegister.disabled = false;
-        } catch(err) {
+        } catch (err) {
             showAuthError(err.message);
             els.btnRegister.textContent = "Create new account";
             els.btnRegister.disabled = false;
@@ -302,31 +375,51 @@ window.addEventListener('DOMContentLoaded', () => {
         try {
             els.btnLogin.disabled = true;
             els.btnLogin.textContent = "Logging in...";
-            
+
             const loginResp = await api.auth.login(user, pass);
             const token = loginResp.data;
             setToken(token);
-            
+
             const payload = JSON.parse(atob(token.split('.')[1]));
             const userId = payload.user_id || payload.sub;
-            
+
             // Strictly check/gen key pair on login
             const keys = await e2e.ensureKeyPair(userId);
             currentUser = { id: userId, username: user, keys };
-            
+
             els.myAvatar.textContent = user.charAt(0).toUpperCase();
             els.myName.textContent = user;
             els.overlayAuth.classList.add('hidden');
             els.appContainer.classList.add('active');
-            
+
             ws.connect(token);
             await loadDashboard();
-            
-        } catch(err) {
+
+        } catch (err) {
             showAuthError(err.message);
             els.btnLogin.disabled = false;
             els.btnLogin.textContent = "Login";
         }
+    }
+
+    async function handleLogout() {
+        if (!confirm("Are you sure you want to logout?")) return;
+
+        // Reset UI Presence items
+        clearAllPresenceDots();
+
+        ws.disconnect();
+        setToken('');
+        currentUser = { id: null, username: null, keys: null };
+        conversationsObj = {};
+        currentConversationId = null;
+
+        els.appContainer.classList.remove('active');
+        els.overlayAuth.classList.remove('hidden');
+        els.btnLogin.disabled = false;
+        els.btnLogin.textContent = "Login";
+
+        console.log("[Auth] Logged out. State cleared. E2EE keys preserved in localStorage.");
     }
 
     async function loadDashboard() {
@@ -336,24 +429,34 @@ window.addEventListener('DOMContentLoaded', () => {
             let participantIds = new Set();
             els.convList.innerHTML = '';
             conversationsObj = {};
-            
-            convs.forEach(conv => {
+
+            // Use Promise.all to ensure all conversations are initialized before proceeding
+            await Promise.all(convs.map(async (conv) => {
                 conversationsObj[conv.id] = conv;
                 ws.subscribe(conv.id);
+
                 if (conv.participants) {
-                    conv.participants.forEach(p => { if (p.user_id !== currentUser.id) participantIds.add(p.user_id); });
+                    conv.participants.forEach(p => { 
+                        if (p.user_id !== currentUser.id) participantIds.add(p.user_id); 
+                    });
                 }
                 renderSidebarItem(conv);
-            });
-            
-            if (participantIds.size > 0) {
-                const presenceResp = await api.users.getPresence(Array.from(participantIds));
-                if (presenceResp.data) {
-                    presenceResp.data.forEach(p => updatePresenceUI(p.user_id, p.status));
-                }
-            }
 
-            // --- FETCH FRIEND REQUESTS ---
+                // Fetch immediate presence for this channel from the server
+                try {
+                    const presence = await ws.getPresence(`chat:${conv.id}`);
+                    for (let clientID in presence) {
+                        const info = presence[clientID];
+                        updatePresenceUI(info.user, 'ONLINE', conv.id);
+                    }
+                } catch (e) {
+                    console.warn(`Could not fetch presence for conv ${conv.id}`, e);
+                }
+            }));
+
+            // Note: We skip the fallback Redis API presence fetch here because JWT client proxy
+            // webhooks in Centrifugo are not invoked by default, making Redis presence stale.
+            // Centrifugo channel presence is our single source of truth for real-time status.
             await fetchFriendRequests();
 
         } catch (err) { console.error("Failed to load dashboard", err); }
@@ -385,27 +488,72 @@ window.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function updatePresenceUI(userId, status) {
+    /**
+     * Centralized function to update user online status across all UI components.
+     * Maps user_id from Centrifugo/Backend to the corresponding elements in the Sidebar.
+     */
+    function setOnlineStatus(userId, status, specificConvId = null) {
+        const isOnline = String(status || '').toLowerCase() === 'online';
+        
+        // Helper to update a single dot
+        const updateDot = (cid) => {
+            let dot = document.getElementById(`presence-${cid}`);
+            if (!dot) return;
+            
+            if (isOnline) {
+                dot.classList.remove('bg-gray-400');
+                dot.classList.add('bg-green-500', 'online');
+            } else {
+                dot.classList.remove('bg-green-500', 'online');
+                dot.classList.add('bg-gray-400');
+            }
+
+            // Also update the active chat header if this is the current conversation
+            if (currentConversationId === cid) {
+                els.chatStatus.innerHTML = isOnline ? '🟢 Online' : '⚪ Offline';
+            }
+        };
+
+        if (specificConvId) {
+            updateDot(specificConvId);
+            return;
+        }
+
+        // --- IMPORTANT LOGIC CHANGE ---
+        // If the user who joined/left is ME, we don't need to update any coworker dots in the sidebar.
+        // The dots represent the status of the peer. My own status is shown in the sidebar header.
+        if (currentUser.id && String(userId) === String(currentUser.id)) {
+             console.log("[Presence] Ignoring self-presence update for sidebar dots.");
+             return;
+        }
+
+        // Iterate through all conversations to find where this user belongs
         for (let cid in conversationsObj) {
             let conv = conversationsObj[cid];
-            let hasUser = conv.participants && conv.participants.some(p => p.user_id === userId);
-            if (hasUser) {
-                let dot = document.getElementById(`presence-${cid}`);
-                if (dot) {
-                    if (status === 'ONLINE') dot.classList.add('online');
-                    else dot.classList.remove('online');
-                    if (currentConversationId === cid) {
-                        els.chatStatus.innerHTML = status === 'ONLINE' ? '🟢 Online' : '⚪ Offline';
-                    }
-                }
-            }
+            let hasUser = conv.participants && conv.participants.some(p => String(p.user_id) === String(userId));
+            if (hasUser) updateDot(cid);
         }
+    }
+
+    // Keep legacy wrapper for compatibility
+    function updatePresenceUI(userId, status, specificConvId = null) { setOnlineStatus(userId, status, specificConvId); }
+
+    presenceBridge.applyPresence = setOnlineStatus;
+
+    function clearAllPresenceDots() {
+        const dots = document.querySelectorAll('.presence-dot');
+        dots.forEach(dot => {
+            dot.classList.remove('bg-green-500', 'online');
+            dot.classList.add('bg-gray-400');
+        });
+        if (els.chatStatus) els.chatStatus.innerHTML = '⚪ Offline';
+        console.log("[Presence] All UI presence status cleared.");
     }
 
     async function handleCreateGroup() {
         const name = els.newGroupName.value.trim();
         const membersRaw = els.newGroupMembers.value.trim();
-        if(!name || !membersRaw) return;
+        if (!name || !membersRaw) return;
         let members = membersRaw.split(',').map(m => m.trim()).filter(x => x);
         try {
             els.btnCreateGroup.disabled = true;
@@ -413,34 +561,34 @@ window.addEventListener('DOMContentLoaded', () => {
             els.dialogNewChat.classList.remove('active');
             els.newGroupName.value = '';
             els.newGroupMembers.value = '';
-            await loadDashboard(); 
-        } catch(err) { alert(err.message); } 
+            await loadDashboard();
+        } catch (err) { alert(err.message); }
         finally { els.btnCreateGroup.disabled = false; }
     }
 
     async function openConversation(cid) {
         if (currentConversationId) {
             const p = document.getElementById(`conv-${currentConversationId}`);
-            if(p) p.classList.remove('active');
+            if (p) p.classList.remove('active');
         }
         currentConversationId = cid;
         const item = document.getElementById(`conv-${currentConversationId}`);
-        if(item) item.classList.add('active');
-        
+        if (item) item.classList.add('active');
+
         const conv = conversationsObj[cid];
         els.chatAvatar.textContent = (conv.name || "?").charAt(0).toUpperCase();
         els.chatName.textContent = conv.name || "Conversation";
         let dot = document.getElementById(`presence-${cid}`);
         let isOnline = dot && dot.classList.contains('online');
         els.chatStatus.innerHTML = isOnline ? '🟢 Online' : '⚪ Offline';
-        
+
         els.chatEmpty.style.display = 'none';
         els.chatView.style.display = 'flex';
         els.btnSend.disabled = false;
         els.messagesContainer.innerHTML = '';
         oldestMessageTimestamp = null;
         highestMessageTimestamp = null;
-        
+
         await loadMessages(cid, null);
         scrollToBottom();
     }
@@ -455,7 +603,7 @@ window.addEventListener('DOMContentLoaded', () => {
                 oldestMessageTimestamp = new Date(msgs[msgs.length - 1].created_at).getTime();
                 msgs.reverse().forEach(m => prependMessageToUI(m));
             }
-        } catch (err) { console.error("Failed to fetch messages", err); } 
+        } catch (err) { console.error("Failed to fetch messages", err); }
         finally { els.loadingHistory.classList.add('hidden'); isLoadingMore = false; }
     }
 
@@ -466,8 +614,8 @@ window.addEventListener('DOMContentLoaded', () => {
             text = "💬 [Sent Message - Encrypted for Receiver]";
         } else {
             if (!currentUser.keys || !currentUser.keys.privateKeyPem) {
-                 text = "⚠️ Vui lòng thiết lập khóa bảo mật để đọc tin nhắn này";
-                 console.warn("[E2EE] Decryption skipped: Private key missing.");
+                text = "⚠️ Vui lòng thiết lập khóa bảo mật để đọc tin nhắn này";
+                console.warn("[E2EE] Decryption skipped: Private key missing.");
             } else {
                 const dec = e2e.decryptMessage(m.content_encrypted, currentUser.keys.privateKeyPem);
                 if (dec) {
@@ -478,7 +626,7 @@ window.addEventListener('DOMContentLoaded', () => {
                 }
             }
         }
-        const timeStr = new Date(m.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+        const timeStr = new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         const div = document.createElement('div');
         div.className = `msg-row ${isSent ? 'sent' : 'received'}`;
         div.innerHTML = `
@@ -493,7 +641,7 @@ window.addEventListener('DOMContentLoaded', () => {
     }
 
     function appendMessageToUI(senderId, content, dateObj, isSent) {
-        const timeStr = dateObj.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+        const timeStr = dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         const div = document.createElement('div');
         div.className = `msg-row ${isSent ? 'sent' : 'received'}`;
         div.innerHTML = `
@@ -538,14 +686,14 @@ window.addEventListener('DOMContentLoaded', () => {
             appendMessageToUI(currentUser.id, text, new Date(), true);
             updateSidebarLastMsg(currentConversationId, "You: " + text, new Date());
             els.msgInput.value = '';
-        } catch(err) { alert("Failed to send: " + err.message); } 
+        } catch (err) { alert("Failed to send: " + err.message); }
         finally { els.btnSend.disabled = false; els.msgInput.focus(); }
     }
 
     function handleIncomingMessage(data) {
         const cid = data.conversation_id;
         if (data.sender_id === currentUser.id) return;
-        
+
         let text = "";
         if (!currentUser.keys || !currentUser.keys.privateKeyPem) {
             text = "⚠️ Vui lòng thiết lập khóa bảo mật để đọc tin nhắn này";
@@ -559,12 +707,16 @@ window.addEventListener('DOMContentLoaded', () => {
                 console.error("[E2EE] RSA decryption failed for incoming message:", data.message_id);
             }
         }
-        
+
         if (cid === currentConversationId) appendMessageToUI(data.sender_id, text, new Date(data.created_at), false);
         updateSidebarLastMsg(cid, text, new Date(data.created_at));
     }
 
-    function handleIncomingPresence(data) { updatePresenceUI(data.user_id, data.status); }
+    function handleIncomingPresence(data) {
+        const uid = data.user_id ?? data.UserID;
+        const st = data.status ?? data.Status;
+        updatePresenceUI(uid, st);
+    }
 
     // --- SEARCH HANDLERS ---
 
@@ -601,7 +753,7 @@ window.addEventListener('DOMContentLoaded', () => {
     }
 
     // Exposed globally so inline onclick can call it
-    window.handleAddFriend = async function(targetUserId) {
+    window.handleAddFriend = async function (targetUserId) {
         try {
             await api.friendships.request(targetUserId);
             els.searchResults.style.display = 'none';
@@ -670,7 +822,7 @@ window.addEventListener('DOMContentLoaded', () => {
     async function handleFriendRequestAction(requestId, action) {
         const acceptBtn = document.getElementById(`accept-${requestId}`);
         const rejectBtn = document.getElementById(`reject-${requestId}`);
-        
+
         if (!acceptBtn || !rejectBtn) return;
 
         // Loading state
@@ -685,7 +837,7 @@ window.addEventListener('DOMContentLoaded', () => {
                 await api.friendships.accept(requestId);
                 showToast('Friend request accepted! 🎉');
                 // Refresh dashboard to show new conversation
-                await loadDashboard(); 
+                await loadDashboard();
             } else {
                 await api.friendships.reject(requestId);
                 showToast('Friend request ignored.');
@@ -746,7 +898,7 @@ window.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    window.handleAcceptRequest = async function(requestId) {
+    window.handleAcceptRequest = async function (requestId) {
         try {
             await api.friendships.accept(requestId);
             showToast('Friend request accepted! A new chat has been created 🎉');
@@ -758,7 +910,7 @@ window.addEventListener('DOMContentLoaded', () => {
         }
     };
 
-    window.handleRejectRequest = async function(requestId) {
+    window.handleRejectRequest = async function (requestId) {
         try {
             await api.friendships.reject(requestId);
             // Re-open dialog to refresh list
@@ -789,7 +941,7 @@ window.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function handleNewConversationCreated(data) {
+    async function handleNewConversationCreated(data) {
         const { conversation_id, peer_id, peer_name, peer_public_key, c_type } = data;
 
         // Cache the peer's public key immediately — E2EE ready from message 1!
@@ -814,6 +966,14 @@ window.addEventListener('DOMContentLoaded', () => {
 
         conversationsObj[conversation_id] = conv;
         ws.subscribe(conversation_id);
+
+        // Fetch presence immediately for the new chat
+        const presence = await ws.getPresence(`chat:${conversation_id}`);
+        for (let clientID in presence) {
+            const info = presence[clientID];
+            if (info && info.user) updatePresenceUI(info.user, 'online', conversation_id);
+        }
+
         renderSidebarItem(conv);
 
         showToast(`New chat with ${peer_name || 'someone'} started! 💬`);
@@ -860,7 +1020,7 @@ window.addEventListener('DOMContentLoaded', () => {
         if (timeEl) {
             const now = new Date();
             const isToday = now.toDateString() === dateObj.toDateString();
-            timeEl.textContent = isToday ? dateObj.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}) : dateObj.toLocaleDateString();
+            timeEl.textContent = isToday ? dateObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : dateObj.toLocaleDateString();
         }
         const convEl = document.getElementById(`conv-${cid}`);
         if (convEl && els.convList.firstChild !== convEl) els.convList.prepend(convEl);
