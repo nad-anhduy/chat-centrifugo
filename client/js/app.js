@@ -122,6 +122,34 @@ const e2e = {
         const decryptor = new window.JSEncrypt();
         decryptor.setPrivateKey(privateKeyPem);
         return decryptor.decrypt(ciphertext);
+    },
+    /** @returns {{ kind:'dual', r:string, s:string }|{ kind:'legacy', raw:string }|{ kind:'empty' }} */
+    parseContentEnvelope(raw) {
+        if (typeof raw !== 'string' || raw.length === 0) return { kind: 'empty' };
+        if (raw[0] !== '{') return { kind: 'legacy', raw };
+        try {
+            const o = JSON.parse(raw);
+            if (o && o.v === 1 && typeof o.r === 'string' && typeof o.s === 'string')
+                return { kind: 'dual', r: o.r, s: o.s };
+        } catch (_) { /* not JSON */ }
+        return { kind: 'legacy', raw };
+    },
+    /**
+     * @param {string} contentEncrypted
+     * @param {boolean} isSentByMe
+     * @param {string} privateKeyPem
+     * @returns {string|false|null} plaintext, false if decrypt failed, null if legacy self-sent (undecryptable)
+     */
+    decryptChatContent(contentEncrypted, isSentByMe, privateKeyPem) {
+        const env = e2e.parseContentEnvelope(contentEncrypted);
+        if (env.kind === 'empty') return '';
+        if (!privateKeyPem) return false;
+        if (env.kind === 'dual') {
+            const blob = isSentByMe ? env.s : env.r;
+            return e2e.decryptMessage(blob, privateKeyPem);
+        }
+        if (isSentByMe) return null;
+        return e2e.decryptMessage(env.raw, privateKeyPem);
     }
 };
 
@@ -241,6 +269,12 @@ let oldestMessageTimestamp = null;
 let isLoadingMore = false;
 
 window.addEventListener('DOMContentLoaded', () => {
+    /** Compare user ids from JWT vs API (UUID casing / string coercion). */
+    function sameUserId(a, b) {
+        if (a == null || b == null) return false;
+        return String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
+    }
+
     // --- DOM REFERENCES ---
     const els = {
         overlayAuth: document.getElementById('auth-overlay'),
@@ -381,7 +415,8 @@ window.addEventListener('DOMContentLoaded', () => {
             setToken(token);
 
             const payload = JSON.parse(atob(token.split('.')[1]));
-            const userId = payload.user_id || payload.sub;
+            const userId = String(payload.user_id || payload.sub || '').trim();
+            if (!userId) throw new Error('Invalid token: missing user id');
 
             // Strictly check/gen key pair on login
             const keys = await e2e.ensureKeyPair(userId);
@@ -413,6 +448,7 @@ window.addEventListener('DOMContentLoaded', () => {
         currentUser = { id: null, username: null, keys: null };
         conversationsObj = {};
         currentConversationId = null;
+        for (const k of Object.keys(publicKeyCache)) delete publicKeyCache[k];
 
         els.appContainer.classList.remove('active');
         els.overlayAuth.classList.remove('hidden');
@@ -437,7 +473,7 @@ window.addEventListener('DOMContentLoaded', () => {
 
                 if (conv.participants) {
                     conv.participants.forEach(p => { 
-                        if (p.user_id !== currentUser.id) participantIds.add(p.user_id); 
+                        if (!sameUserId(p.user_id, currentUser.id)) participantIds.add(p.user_id); 
                     });
                 }
                 renderSidebarItem(conv);
@@ -522,7 +558,7 @@ window.addEventListener('DOMContentLoaded', () => {
         // --- IMPORTANT LOGIC CHANGE ---
         // If the user who joined/left is ME, we don't need to update any coworker dots in the sidebar.
         // The dots represent the status of the peer. My own status is shown in the sidebar header.
-        if (currentUser.id && String(userId) === String(currentUser.id)) {
+        if (currentUser.id && sameUserId(userId, currentUser.id)) {
              console.log("[Presence] Ignoring self-presence update for sidebar dots.");
              return;
         }
@@ -530,7 +566,7 @@ window.addEventListener('DOMContentLoaded', () => {
         // Iterate through all conversations to find where this user belongs
         for (let cid in conversationsObj) {
             let conv = conversationsObj[cid];
-            let hasUser = conv.participants && conv.participants.some(p => String(p.user_id) === String(userId));
+            let hasUser = conv.participants && conv.participants.some(p => sameUserId(p.user_id, userId));
             if (hasUser) updateDot(cid);
         }
     }
@@ -600,30 +636,29 @@ window.addEventListener('DOMContentLoaded', () => {
             const resp = await api.conversations.getMessages(cid, 100, beforeTs);
             const msgs = resp.data || [];
             if (msgs.length > 0) {
+                // API returns newest-first (DESC). Prepend in that order so DOM ends up oldest→newest (top→bottom).
                 oldestMessageTimestamp = new Date(msgs[msgs.length - 1].created_at).getTime();
-                msgs.reverse().forEach(m => prependMessageToUI(m));
+                msgs.forEach(m => prependMessageToUI(m));
             }
         } catch (err) { console.error("Failed to fetch messages", err); }
         finally { els.loadingHistory.classList.add('hidden'); isLoadingMore = false; }
     }
 
     function prependMessageToUI(m) {
-        const isSent = m.sender_id === currentUser.id;
+        const isSent = sameUserId(m.sender_id, currentUser.id);
         let text = "";
-        if (isSent) {
-            text = "💬 [Sent Message - Encrypted for Receiver]";
+        if (!currentUser.keys || !currentUser.keys.privateKeyPem) {
+            text = "⚠️ Vui lòng thiết lập khóa bảo mật để đọc tin nhắn này";
+            console.warn("[E2EE] Decryption skipped: Private key missing.");
         } else {
-            if (!currentUser.keys || !currentUser.keys.privateKeyPem) {
-                text = "⚠️ Vui lòng thiết lập khóa bảo mật để đọc tin nhắn này";
-                console.warn("[E2EE] Decryption skipped: Private key missing.");
+            const dec = e2e.decryptChatContent(m.content_encrypted, isSent, currentUser.keys.privateKeyPem);
+            if (dec !== false && dec !== null) {
+                text = dec;
+            } else if (dec === null) {
+                text = "🔒 Tin bạn đã gửi (định dạng cũ — chỉ người nhận đọc được)";
             } else {
-                const dec = e2e.decryptMessage(m.content_encrypted, currentUser.keys.privateKeyPem);
-                if (dec) {
-                    text = dec;
-                } else {
-                    text = "⚠️ [Conversation corrupted - RSA decryption failed]";
-                    console.error("[E2EE] RSA decryption failed for message:", m.message_id);
-                }
+                text = "⚠️ [Conversation corrupted - RSA decryption failed]";
+                console.error("[E2EE] RSA decryption failed for message:", m.message_id);
             }
         }
         const timeStr = new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -673,15 +708,19 @@ window.addEventListener('DOMContentLoaded', () => {
         if (!text || !currentConversationId) return;
         const conv = conversationsObj[currentConversationId];
         if (!conv || !conv.participants) return alert("Conversation corrupted");
-        const receiver = conv.participants.find(p => p.user_id !== currentUser.id);
+        const receiver = conv.participants.find(p => !sameUserId(p.user_id, currentUser.id));
         if (!receiver) return alert("No receiver found in this conversation");
         try {
             els.btnSend.disabled = true;
             console.log("Encrypting with Public Key of user:", receiver.user_id);
             const pubKey = await e2e.getPublicKey(receiver.user_id);
             if (!pubKey) throw new Error("Could not fetch receiver's public key (they might need to set one up)");
-            const encryptedText = e2e.encryptMessage(text, pubKey);
-            if (!encryptedText) throw new Error("RSA Encryption failed (check key format)");
+            const ownPub = currentUser.keys.publicKeyPem;
+            if (!ownPub) throw new Error("Missing your public key — try logging in again");
+            const encR = e2e.encryptMessage(text, pubKey);
+            const encS = e2e.encryptMessage(text, ownPub);
+            if (!encR || !encS) throw new Error("RSA Encryption failed (message too long or bad key format)");
+            const encryptedText = JSON.stringify({ v: 1, r: encR, s: encS });
             await api.chat.sendMessage(currentConversationId, encryptedText);
             appendMessageToUI(currentUser.id, text, new Date(), true);
             updateSidebarLastMsg(currentConversationId, "You: " + text, new Date());
@@ -692,15 +731,15 @@ window.addEventListener('DOMContentLoaded', () => {
 
     function handleIncomingMessage(data) {
         const cid = data.conversation_id;
-        if (data.sender_id === currentUser.id) return;
+        if (sameUserId(data.sender_id, currentUser.id)) return;
 
         let text = "";
         if (!currentUser.keys || !currentUser.keys.privateKeyPem) {
             text = "⚠️ Vui lòng thiết lập khóa bảo mật để đọc tin nhắn này";
             console.warn("[E2EE] Incoming message decryption skipped: Private key missing.");
         } else {
-            const decText = e2e.decryptMessage(data.content_encrypted, currentUser.keys.privateKeyPem);
-            if (decText) {
+            const decText = e2e.decryptChatContent(data.content_encrypted, false, currentUser.keys.privateKeyPem);
+            if (decText !== false && decText !== null) {
                 text = decText;
             } else {
                 text = "⚠️ [Conversation corrupted - RSA decryption failed]";
