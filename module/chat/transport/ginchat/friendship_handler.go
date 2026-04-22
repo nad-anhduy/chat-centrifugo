@@ -111,7 +111,8 @@ func (h *FriendshipHandler) Pending(c *gin.Context) {
 			"id":           req.ID,
 			"requester_id": req.RequesterID,
 			"requester": gin.H{
-				"username": req.Requester.Username,
+				"username":   req.Requester.Username,
+				"avatar_url": req.Requester.AvatarURL,
 			},
 			"created_at": req.CreatedAt,
 		})

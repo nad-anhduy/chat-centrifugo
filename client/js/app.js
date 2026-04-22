@@ -2,8 +2,12 @@
 const API_BASE = 'http://localhost:8080/api/v1';
 let authToken = '';
 
-function setToken(token) { authToken = token; }
-function getToken() { return authToken; }
+function setToken(token) { 
+    authToken = token; 
+    if (token) localStorage.setItem('chat_token', token);
+    else localStorage.removeItem('chat_token');
+}
+function getToken() { return authToken || localStorage.getItem('chat_token'); }
 
 async function apiRequest(path, options = {}) {
     const headers = { 'Content-Type': 'application/json', ...options.headers };
@@ -186,7 +190,7 @@ const e2e = {
 const WS_BASE = 'ws://localhost:8000/connection/websocket';
 let centrifuge = null;
 let currentSubscriptions = {};
-let wsCallbacks = { onMessage: null, onPresence: null, onConnect: null, onDisconnect: null };
+let wsCallbacks = { onMessage: null, onPresence: null, onTyping: null, onConnect: null, onDisconnect: null };
 
 // Wired from DOMContentLoaded so channel join/leave handlers (defined above setOnlineStatus) can update dots.
 const presenceBridge = {
@@ -212,8 +216,15 @@ const ws = {
         sub.on('publication', function (ctx) {
             const data = ctx.data;
             const msgType = data.type ?? data.Type;
+            console.log("Received publication:", data);
+            console.log(`[WS] Publication on ${channel}:`, data);
+            
             if (msgType === 'presence_update') {
                 if (wsCallbacks.onPresence) wsCallbacks.onPresence(data);
+            } else if (msgType === 'TYPING') {
+                if (wsCallbacks.onTyping) wsCallbacks.onTyping(data);
+            } else if (msgType === 'STOP_TYPING') {
+                if (wsCallbacks.onTyping) wsCallbacks.onTyping(data);
             } else {
                 if (wsCallbacks.onMessage) wsCallbacks.onMessage(data);
             }
@@ -304,6 +315,11 @@ window.addEventListener('DOMContentLoaded', () => {
         return String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
     }
 
+    // Typing state
+    let typingTimeout = null;
+    let lastTypingSent = 0;
+    let typingUsers = {}; // userId -> { username, timeout }
+
     // --- DOM REFERENCES ---
     const els = {
         overlayAuth: document.getElementById('auth-overlay'),
@@ -350,6 +366,7 @@ window.addEventListener('DOMContentLoaded', () => {
         // Friend Requests Section
         friendReqSection: document.getElementById('friend-requests-section'),
         friendReqList: document.getElementById('friend-requests-list'),
+        typingIndicator: document.getElementById('typing-indicator'),
 
         btnLogout: document.getElementById('btn-logout'),
     };
@@ -359,7 +376,13 @@ window.addEventListener('DOMContentLoaded', () => {
     els.btnLogin.addEventListener('click', handleLogin);
     els.btnLogout.addEventListener('click', handleLogout);
     els.btnSend.addEventListener('click', handleSend);
-    els.msgInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') handleSend(); });
+    els.msgInput.addEventListener('input', handleTyping);
+    els.msgInput.addEventListener('keypress', (e) => { 
+        if (e.key === 'Enter') {
+            stopTyping();
+            handleSend(); 
+        }
+    });
     els.btnNewChat.addEventListener('click', () => els.dialogNewChat.classList.add('active'));
     els.btnCancelGroup.addEventListener('click', () => els.dialogNewChat.classList.remove('active'));
     els.btnCreateGroup.addEventListener('click', handleCreateGroup);
@@ -400,6 +423,7 @@ window.addEventListener('DOMContentLoaded', () => {
         onDisconnect: () => console.log('WS Disconnected'),
         onMessage: handleIncomingMessage,
         onPresence: handleIncomingPresence,
+        onTyping: handleIncomingTypingEvent,
         onSystemEvent: handleSystemEvent
     });
 
@@ -453,6 +477,10 @@ window.addEventListener('DOMContentLoaded', () => {
             els.appContainer.classList.add('active');
 
             ws.connect(d.token);
+            
+            // Persist user info for reload
+            localStorage.setItem('chat_user', JSON.stringify(currentUser));
+
             await loadDashboard();
 
         } catch (err) {
@@ -480,8 +508,36 @@ window.addEventListener('DOMContentLoaded', () => {
         els.btnLogin.disabled = false;
         els.btnLogin.textContent = "Login";
 
+        localStorage.removeItem('chat_token');
+        localStorage.removeItem('chat_user');
+
         console.log("[Auth] Logged out. State cleared. E2EE keys preserved in localStorage.");
     }
+
+    // Auto-login logic
+    async function initApp() {
+        const token = localStorage.getItem('chat_token');
+        const userJson = localStorage.getItem('chat_user');
+        if (token && userJson) {
+            try {
+                setToken(token);
+                currentUser = JSON.parse(userJson);
+                
+                els.myAvatar.textContent = currentUser.username.charAt(0).toUpperCase();
+                els.myName.textContent = currentUser.username;
+                els.overlayAuth.classList.add('hidden');
+                els.appContainer.classList.add('active');
+
+                ws.connect(token);
+                await loadDashboard();
+                console.log("[Auth] Session restored for", currentUser.username);
+            } catch (err) {
+                console.error("Auto-login failed", err);
+                handleLogout();
+            }
+        }
+    }
+    initApp();
 
     async function loadDashboard() {
         try {
@@ -650,8 +706,14 @@ window.addEventListener('DOMContentLoaded', () => {
         oldestMessageTimestamp = null;
         highestMessageTimestamp = null;
 
+        els.chatMessagesScroll.scrollTop = 0;
         await loadMessages(cid, null);
         scrollToBottom();
+
+        // Clear typing indicator state on switch
+        for (let uid in typingUsers) clearTimeout(typingUsers[uid].timeout);
+        typingUsers = {};
+        updateTypingUI();
     }
 
     async function loadMessages(cid, beforeTs) {
@@ -814,6 +876,114 @@ window.addEventListener('DOMContentLoaded', () => {
 
         if (cid === currentConversationId) appendMessageToUI(data.sender_id, text, new Date(data.created_at), false);
         updateSidebarLastMsg(cid, text, new Date(data.created_at));
+        // Clear typing indicator if message received from that user
+        handleIncomingTypingEvent({ type: 'STOP_TYPING', conversation_id: cid, user_id: data.sender_id });
+    }
+
+    // --- TYPING INDICATOR LOGIC ---
+
+    function handleTyping() {
+        if (!currentConversationId || !centrifuge) return;
+        
+        const text = els.msgInput.value.trim();
+        if (!text) {
+            stopTyping();
+            return;
+        }
+
+        const now = Date.now();
+        if (now - lastTypingSent > 2000) { // Throttle: 2 seconds
+            const channel = `chat:${currentConversationId}`;
+            const payload = {
+                type: 'TYPING',
+                user_id: String(currentUser.id), // Ensure string for comparison
+                username: currentUser.username,
+                conversation_id: currentConversationId
+            };
+            console.log("Publishing typing event to channel:", channel);
+            console.log(`[Typing] Publishing to ${channel}:`, payload);
+            centrifuge.publish(channel, payload);
+            lastTypingSent = now;
+        }
+
+        // Auto-stop typing after inactivity
+        clearTimeout(typingTimeout);
+        typingTimeout = setTimeout(() => {
+            stopTyping();
+        }, 5000);
+    }
+
+    function stopTyping() {
+        if (!currentConversationId || !centrifuge) return;
+        clearTimeout(typingTimeout);
+        const channel = `chat:${currentConversationId}`;
+        const payload = {
+            type: 'STOP_TYPING',
+            user_id: String(currentUser.id),
+            conversation_id: currentConversationId
+        };
+        console.log(`[Typing] Stopping on ${channel}`);
+        centrifuge.publish(channel, payload);
+        lastTypingSent = 0;
+    }
+
+    function handleIncomingTypingEvent(data) {
+        if (!data) return;
+        const msgType = data.type ?? data.Type;
+        const uid = String(data.user_id ?? data.userId ?? data.UserID ?? '');
+        const convId = data.conversation_id ?? data.conversationId ?? data.ConversationID;
+
+        // only for current conversation
+        if (!currentConversationId || String(convId) !== String(currentConversationId)) return;
+
+        // ignore self events (string/number/uuid safe)
+        if (sameUserId(uid, currentUser.id)) return;
+
+        if (msgType === 'STOP_TYPING') {
+            if (typingUsers[uid]) {
+                console.log(`[Typing] User stopped typing: ${uid}`);
+                clearTimeout(typingUsers[uid].timeout);
+                delete typingUsers[uid];
+                updateTypingUI();
+            }
+            return;
+        }
+
+        if (msgType !== 'TYPING') return;
+
+        const username = String(data.username ?? data.user_name ?? data.Username ?? uid);
+        console.log(`[Typing] User ${username} is typing in ${convId}`);
+
+        if (typingUsers[uid]) clearTimeout(typingUsers[uid].timeout);
+        typingUsers[uid] = {
+            username,
+            timeout: setTimeout(() => {
+                delete typingUsers[uid];
+                updateTypingUI();
+            }, 3000)
+        };
+        updateTypingUI();
+    }
+
+    function updateTypingUI() {
+        const users = Object.values(typingUsers).map(u => u.username);
+        if (users.length === 0) {
+            els.typingIndicator.style.display = 'none';
+            els.typingIndicator.textContent = '';
+            return;
+        }
+
+        let text = "";
+        if (users.length === 1) {
+            text = `${users[0]} is typing...`;
+        } else if (users.length === 2) {
+            text = `${users[0]} and ${users[1]} are typing...`;
+        } else {
+            text = `${users.length} people are typing...`;
+        }
+
+        els.typingIndicator.textContent = text;
+        els.typingIndicator.style.display = 'block';
     }
 
     function handleIncomingPresence(data) {
@@ -900,10 +1070,14 @@ window.addEventListener('DOMContentLoaded', () => {
 
         const username = req.requester?.username || 'Unknown';
         const initial = username.charAt(0).toUpperCase();
+        const avatarUrl = req.requester?.avatar_url;
 
         div.innerHTML = `
             <div class="friend-req-info">
-                <div class="friend-req-avatar">${initial}</div>
+                ${avatarUrl 
+                    ? `<img src="${avatarUrl}" class="friend-req-avatar" style="object-fit: cover;">`
+                    : `<div class="friend-req-avatar">${initial}</div>`
+                }
                 <div class="friend-req-user">
                     <div class="friend-req-username">${escapeHtml(username)}</div>
                 </div>
