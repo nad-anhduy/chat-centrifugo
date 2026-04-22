@@ -39,7 +39,14 @@ func main() {
 		log.Fatalf("failed to connect to postgres: %v", err)
 	}
 
-	err = db.AutoMigrate(&model.User{}, &model.Conversation{}, &model.Participant{}, &model.Friendship{})
+	err = db.AutoMigrate(
+		&model.User{},
+		&model.UserDevice{},
+		&model.UserDeviceChanged{},
+		&model.Conversation{},
+		&model.Participant{},
+		&model.Friendship{},
+	)
 	if err != nil {
 		log.Fatalf("failed to auto migrate postgres: %v", err)
 	}
@@ -105,7 +112,7 @@ func main() {
 	publisher := centrifugo.NewPublisher(c)
 
 	// 6. Initialize Services (Business Layer)
-	authBiz := business.NewAuthBusiness(postgresStore, cfg.JWTSecret)
+	authBiz := business.NewAuthBusiness(postgresStore, cfg.JWTSecret, cfg.MasterKey)
 	chatBiz := business.NewChatBusiness(scyllaStore, publisher, postgresStore, postgresStore, redisStore, presenceTTL)
 	friendBiz := business.NewFriendshipBusiness(postgresStore, postgresStore, postgresStore, publisher)
 
@@ -114,7 +121,7 @@ func main() {
 	chatHandler := ginchat.NewChatHandler(chatBiz)
 	convHandler := ginchat.NewConversationHandler(chatBiz)
 	userHandler := ginchat.NewUserHandler(chatBiz, friendBiz)
-	friendHandler := ginchat.NewFriendshipHandler(friendBiz)
+	friendHandler := ginchat.NewFriendshipHandler(friendBiz, publisher)
 	presenceHandler := ginchat.NewPresenceHandler(chatBiz)
 	webhookHandler := ginchat.NewWebhookHandler(chatBiz)
 

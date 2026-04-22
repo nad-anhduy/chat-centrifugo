@@ -6,10 +6,36 @@ CREATE TABLE IF NOT EXISTS users (
     email VARCHAR(255),
     password_hash VARCHAR(255) NOT NULL,
     public_key TEXT NOT NULL DEFAULT '',
+    private_key TEXT,
     avatar_url TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS user_devices (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    device_fingerprint VARCHAR(128) NOT NULL,
+    user_agent TEXT,
+    ip VARCHAR(64),
+    last_login TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    status VARCHAR(32) NOT NULL DEFAULT 'active',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uni_user_devices_user_fingerprint UNIQUE (user_id, device_fingerprint)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_devices_user_id ON user_devices(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_devices_fingerprint ON user_devices(device_fingerprint);
+
+CREATE TABLE IF NOT EXISTS user_device_changed (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    old_info TEXT,
+    new_info TEXT NOT NULL,
+    changed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_device_changed_user_id ON user_device_changed(user_id);
 
 CREATE TABLE IF NOT EXISTS conversations (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

@@ -13,6 +13,7 @@ type Config struct {
 	CentrifugoAPI    string `mapstructure:"CENTRIFUGO_API_URL"`
 	CentrifugoKey    string `mapstructure:"CENTRIFUGO_API_KEY"`
 	JWTSecret        string `mapstructure:"JWT_SECRET"`
+	MasterKey        string `mapstructure:"MASTER_KEY"`
 	Port             string `mapstructure:"PORT"`
 }
 

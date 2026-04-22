@@ -18,7 +18,7 @@ async function apiRequest(path, options = {}) {
 const api = {
     auth: {
         login: (username, password) => apiRequest('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
-        register: (username, password, public_key) => apiRequest('/auth/register', { method: 'POST', body: JSON.stringify({ username, password, public_key }) })
+        register: (username, password) => apiRequest('/auth/register', { method: 'POST', body: JSON.stringify({ username, password }) })
     },
     users: {
         updatePublicKey: (public_key) => apiRequest('/users/me/public-key', { method: 'PUT', body: JSON.stringify({ public_key }) }),
@@ -37,7 +37,11 @@ const api = {
         }
     },
     chat: {
-        sendMessage: (conversation_id, content_encrypted) => apiRequest('/chat/messages', { method: 'POST', body: JSON.stringify({ conversation_id, content_encrypted }) })
+        sendMessage: (conversation_id, content_encrypted, key_for_sender = '', key_for_receiver = '', iv = '') =>
+            apiRequest('/chat/messages', {
+                method: 'POST',
+                body: JSON.stringify({ conversation_id, content_encrypted, key_for_sender, key_for_receiver, iv })
+            })
     },
     friendships: {
         request: (target_user_id) => apiRequest('/friendships/request', { method: 'POST', body: JSON.stringify({ target_user_id }) }),
@@ -47,7 +51,70 @@ const api = {
     }
 };
 
-// ---- CRYPTO (JSEncrypt Wrapper) ----
+// ---- CRYPTO (Web Crypto hybrid + optional JSEncrypt for legacy envelopes) ----
+function pemToDer(pem) {
+    const b64 = pem.replace(/-----BEGIN [^-]+-----|-----END [^-]+-----|\s/g, '');
+    const raw = atob(b64);
+    const buf = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
+    return buf.buffer;
+}
+function b64encode(buf) {
+    const bytes = new Uint8Array(buf);
+    let bin = '';
+    const chunk = 8192;
+    for (let i = 0; i < bytes.length; i += chunk) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+    }
+    return btoa(bin);
+}
+function b64decode(s) {
+    const raw = atob(s);
+    const u = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) u[i] = raw.charCodeAt(i);
+    return u;
+}
+async function importSpkiPublicRSA(pem) {
+    return crypto.subtle.importKey('spki', pemToDer(pem), { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['encrypt']);
+}
+async function importPkcs8PrivateRSA(pem) {
+    return crypto.subtle.importKey('pkcs8', pemToDer(pem), { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['decrypt']);
+}
+async function encryptHybridForPeer(plaintext, receiverPublicKeyPem) {
+    const receiverPub = await importSpkiPublicRSA(receiverPublicKeyPem);
+    const senderPubPem = currentUser?.keys?.publicKeyPem;
+    const senderPub = senderPubPem ? await importSpkiPublicRSA(senderPubPem) : null;
+    const aesRaw = crypto.getRandomValues(new Uint8Array(32));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const aesKey = await crypto.subtle.importKey('raw', aesRaw, { name: 'AES-GCM', length: 256 }, false, ['encrypt']);
+    const pt = new TextEncoder().encode(plaintext);
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, pt);
+    const wrappedForReceiver = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, receiverPub, aesRaw);
+    const wrappedForSender = senderPub ? await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, senderPub, aesRaw) : null;
+    return {
+        content_encrypted: b64encode(ct),
+        key_for_receiver: b64encode(wrappedForReceiver),
+        key_for_sender: wrappedForSender ? b64encode(wrappedForSender) : '',
+        iv: b64encode(iv),
+    };
+}
+async function decryptHybridMessage(contentB64, wrapB64, ivB64, privateKeyPem) {
+    const priv = await importPkcs8PrivateRSA(privateKeyPem);
+    const wrap = b64decode(wrapB64);
+    const iv = b64decode(ivB64);
+    const ct = b64decode(contentB64);
+    const aesRawBuf = await crypto.subtle.decrypt({ name: 'RSA-OAEP' }, priv, wrap);
+    const aesKey = await crypto.subtle.importKey(
+        'raw',
+        new Uint8Array(aesRawBuf),
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['decrypt']
+    );
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, aesKey, ct);
+    return new TextDecoder().decode(pt);
+}
+
 const publicKeyCache = {};
 const e2e = {
     storeKeys: (userId, publicPem, privatePem) => {
@@ -62,40 +129,9 @@ const e2e = {
         localStorage.removeItem(`e2ee_public_key_${userId}`);
         localStorage.removeItem(`e2ee_private_key_${userId}`);
     },
-    generateKeys: () => {
-        const crypt = new window.JSEncrypt({ default_key_size: 2048 });
-        crypt.getKey();
-        return { publicKeyPem: crypt.getPublicKey(), privateKeyPem: crypt.getPrivateKey() };
-    },
-    ensureKeyPair: async (userId) => {
-        const stored = e2e.loadStoredKeys(userId);
-        if (stored.publicPem && stored.privatePem) {
-            // Verify if keys are valid and matching
-            const testPlain = 'verify-key-' + Date.now();
-            const enc = e2e.encryptMessage(testPlain, stored.publicPem);
-            if (enc) {
-                const dec = e2e.decryptMessage(enc, stored.privatePem);
-                if (dec === testPlain) {
-                    console.log("[E2EE] Valid keys found in localStorage for user:", userId);
-                    return { publicKeyPem: stored.publicPem, privateKeyPem: stored.privatePem };
-                }
-            }
-            console.warn("[E2EE] Stored keys corrupt or invalid. Regenerating...");
-            e2e.clearStoredKeys(userId);
-        }
-
-        console.log("[E2EE] Generating new RSA-2048 keys for user:", userId);
-        const keys = e2e.generateKeys();
-        e2e.storeKeys(userId, keys.publicKeyPem, keys.privateKeyPem);
-
-        try {
-            await api.users.updatePublicKey(keys.publicKeyPem);
-            console.log("[E2EE] New public key synced to server.");
-        } catch (err) {
-            console.error("[E2EE] Failed to sync new public key to server:", err);
-        }
-
-        return keys;
+    applyLoginKeys(userId, publicKeyPem, privateKeyPem) {
+        e2e.storeKeys(userId, publicKeyPem, privateKeyPem);
+        return { publicKeyPem, privateKeyPem };
     },
     getPublicKey: async (userId) => {
         if (publicKeyCache[userId]) return publicKeyCache[userId];
@@ -105,25 +141,24 @@ const e2e = {
                 publicKeyCache[userId] = resp.data.public_key;
                 return resp.data.public_key;
             }
-            throw new Error("No public key found in response");
+            throw new Error('No public key found in response');
         } catch (err) {
             console.error(`Failed to fetch public key for ${userId}`, err);
             return null;
         }
     },
     encryptMessage: (plaintext, publicKeyPem) => {
-        if (!publicKeyPem) return false;
+        if (!publicKeyPem || !window.JSEncrypt) return false;
         const encryptor = new window.JSEncrypt();
         encryptor.setPublicKey(publicKeyPem);
         return encryptor.encrypt(plaintext);
     },
     decryptMessage: (ciphertext, privateKeyPem) => {
-        if (!privateKeyPem) return false;
+        if (!privateKeyPem || !window.JSEncrypt) return false;
         const decryptor = new window.JSEncrypt();
         decryptor.setPrivateKey(privateKeyPem);
         return decryptor.decrypt(ciphertext);
     },
-    /** @returns {{ kind:'dual', r:string, s:string }|{ kind:'legacy', raw:string }|{ kind:'empty' }} */
     parseContentEnvelope(raw) {
         if (typeof raw !== 'string' || raw.length === 0) return { kind: 'empty' };
         if (raw[0] !== '{') return { kind: 'legacy', raw };
@@ -134,12 +169,6 @@ const e2e = {
         } catch (_) { /* not JSON */ }
         return { kind: 'legacy', raw };
     },
-    /**
-     * @param {string} contentEncrypted
-     * @param {boolean} isSentByMe
-     * @param {string} privateKeyPem
-     * @returns {string|false|null} plaintext, false if decrypt failed, null if legacy self-sent (undecryptable)
-     */
     decryptChatContent(contentEncrypted, isSentByMe, privateKeyPem) {
         const env = e2e.parseContentEnvelope(contentEncrypted);
         if (env.kind === 'empty') return '';
@@ -150,7 +179,7 @@ const e2e = {
         }
         if (isSentByMe) return null;
         return e2e.decryptMessage(env.raw, privateKeyPem);
-    }
+    },
 };
 
 // ---- WEBSOCKET ----
@@ -229,7 +258,7 @@ const ws = {
         }
     },
     subscribeUserChannel: (userId) => {
-        const channel = `user:#${userId}`;
+        const channel = `user_notif:${userId}`;
         if (currentSubscriptions[channel]) return currentSubscriptions[channel];
         console.log('Subscribing to personal channel', channel);
         const sub = centrifuge.newSubscription(channel);
@@ -383,15 +412,11 @@ window.addEventListener('DOMContentLoaded', () => {
 
         try {
             els.btnRegister.disabled = true;
-            els.btnRegister.textContent = "Generating keys...";
+            els.btnRegister.textContent = "Creating account...";
 
-            let keys = e2e.generateKeys();
-            await api.auth.register(user, pass, keys.publicKeyPem);
+            await api.auth.register(user, pass);
 
-            // Note: We don't store keys during registration to ensure the login flow 
-            // is the source of truth for current logged-in user context.
-
-            showAuthError("Registered successfully! Please login.");
+            showAuthError("Registered successfully! Please login (keys are issued on the server).");
             els.btnRegister.textContent = "Create new account";
             els.btnRegister.disabled = false;
         } catch (err) {
@@ -411,15 +436,15 @@ window.addEventListener('DOMContentLoaded', () => {
             els.btnLogin.textContent = "Logging in...";
 
             const loginResp = await api.auth.login(user, pass);
-            const token = loginResp.data;
-            setToken(token);
+            const d = loginResp.data;
+            if (!d || !d.token) throw new Error('Invalid login response');
+            setToken(d.token);
 
-            const payload = JSON.parse(atob(token.split('.')[1]));
+            const payload = JSON.parse(atob(d.token.split('.')[1]));
             const userId = String(payload.user_id || payload.sub || '').trim();
             if (!userId) throw new Error('Invalid token: missing user id');
 
-            // Strictly check/gen key pair on login
-            const keys = await e2e.ensureKeyPair(userId);
+            const keys = e2e.applyLoginKeys(userId, d.public_key, d.private_key);
             currentUser = { id: userId, username: user, keys };
 
             els.myAvatar.textContent = user.charAt(0).toUpperCase();
@@ -427,7 +452,7 @@ window.addEventListener('DOMContentLoaded', () => {
             els.overlayAuth.classList.add('hidden');
             els.appContainer.classList.add('active');
 
-            ws.connect(token);
+            ws.connect(d.token);
             await loadDashboard();
 
         } catch (err) {
@@ -638,18 +663,38 @@ window.addEventListener('DOMContentLoaded', () => {
             if (msgs.length > 0) {
                 // API returns newest-first (DESC). Prepend in that order so DOM ends up oldest→newest (top→bottom).
                 oldestMessageTimestamp = new Date(msgs[msgs.length - 1].created_at).getTime();
-                msgs.forEach(m => prependMessageToUI(m));
+                for (let i = 0; i < msgs.length; i++) {
+                    await prependMessageToUI(msgs[i]);
+                }
             }
         } catch (err) { console.error("Failed to fetch messages", err); }
         finally { els.loadingHistory.classList.add('hidden'); isLoadingMore = false; }
     }
 
-    function prependMessageToUI(m) {
+    async function prependMessageToUI(m) {
         const isSent = sameUserId(m.sender_id, currentUser.id);
         let text = "";
         if (!currentUser.keys || !currentUser.keys.privateKeyPem) {
             text = "⚠️ Vui lòng thiết lập khóa bảo mật để đọc tin nhắn này";
             console.warn("[E2EE] Decryption skipped: Private key missing.");
+        } else if ((m.key_for_sender || m.key_for_receiver) && m.iv) {
+            const wrapped = isSent ? m.key_for_sender : m.key_for_receiver;
+            if (!wrapped) {
+                text = "⚠️ [Missing wrapped key for this message]";
+                console.error("[E2EE] missing wrapped key", { message_id: m.message_id, isSent, hasSenderKey: !!m.key_for_sender, hasReceiverKey: !!m.key_for_receiver });
+            } else {
+                try {
+                    text = await decryptHybridMessage(
+                        m.content_encrypted,
+                        wrapped,
+                        m.iv,
+                        currentUser.keys.privateKeyPem
+                    );
+                } catch (e) {
+                    text = "⚠️ [Hybrid decrypt failed]";
+                    console.error("[E2EE] hybrid decrypt failed", m.message_id, e);
+                }
+            }
         } else {
             const dec = e2e.decryptChatContent(m.content_encrypted, isSent, currentUser.keys.privateKeyPem);
             if (dec !== false && dec !== null) {
@@ -715,13 +760,14 @@ window.addEventListener('DOMContentLoaded', () => {
             console.log("Encrypting with Public Key of user:", receiver.user_id);
             const pubKey = await e2e.getPublicKey(receiver.user_id);
             if (!pubKey) throw new Error("Could not fetch receiver's public key (they might need to set one up)");
-            const ownPub = currentUser.keys.publicKeyPem;
-            if (!ownPub) throw new Error("Missing your public key — try logging in again");
-            const encR = e2e.encryptMessage(text, pubKey);
-            const encS = e2e.encryptMessage(text, ownPub);
-            if (!encR || !encS) throw new Error("RSA Encryption failed (message too long or bad key format)");
-            const encryptedText = JSON.stringify({ v: 1, r: encR, s: encS });
-            await api.chat.sendMessage(currentConversationId, encryptedText);
+            const hybrid = await encryptHybridForPeer(text, pubKey);
+            await api.chat.sendMessage(
+                currentConversationId,
+                hybrid.content_encrypted,
+                hybrid.key_for_sender,
+                hybrid.key_for_receiver,
+                hybrid.iv
+            );
             appendMessageToUI(currentUser.id, text, new Date(), true);
             updateSidebarLastMsg(currentConversationId, "You: " + text, new Date());
             els.msgInput.value = '';
@@ -729,7 +775,7 @@ window.addEventListener('DOMContentLoaded', () => {
         finally { els.btnSend.disabled = false; els.msgInput.focus(); }
     }
 
-    function handleIncomingMessage(data) {
+    async function handleIncomingMessage(data) {
         const cid = data.conversation_id;
         if (sameUserId(data.sender_id, currentUser.id)) return;
 
@@ -737,6 +783,25 @@ window.addEventListener('DOMContentLoaded', () => {
         if (!currentUser.keys || !currentUser.keys.privateKeyPem) {
             text = "⚠️ Vui lòng thiết lập khóa bảo mật để đọc tin nhắn này";
             console.warn("[E2EE] Incoming message decryption skipped: Private key missing.");
+        } else if ((data.key_for_sender || data.key_for_receiver) && data.iv) {
+            const isSent = sameUserId(data.sender_id, currentUser.id);
+            const wrapped = isSent ? data.key_for_sender : data.key_for_receiver;
+            if (!wrapped) {
+                text = "⚠️ [Missing wrapped key for this message]";
+                console.error("[E2EE] incoming missing wrapped key", { message_id: data.message_id, isSent, hasSenderKey: !!data.key_for_sender, hasReceiverKey: !!data.key_for_receiver });
+            } else {
+                try {
+                    text = await decryptHybridMessage(
+                        data.content_encrypted,
+                        wrapped,
+                        data.iv,
+                        currentUser.keys.privateKeyPem
+                    );
+                } catch (e) {
+                    text = "⚠️ [Hybrid decrypt failed]";
+                    console.error("[E2EE] incoming hybrid decrypt failed", data.message_id, e);
+                }
+            }
         } else {
             const decText = e2e.decryptChatContent(data.content_encrypted, false, currentUser.keys.privateKeyPem);
             if (decText !== false && decText !== null) {
@@ -964,11 +1029,14 @@ window.addEventListener('DOMContentLoaded', () => {
     function handleSystemEvent(data) {
         console.log('[SystemEvent]', data);
         switch (data.type) {
-            case 'friend_request_received':
-                pendingBadgeCount++;
-                updatePendingBadge();
-                showToast('You have a new friend request! 👋');
-                fetchFriendRequests(); // Sync sidebar section
+            case 'NEW_FRIEND_REQUEST':
+                const newData = {
+                    id: data.data.request_id,
+                    requester: { username: data.data.from_user }
+                };
+                friendRequests = [newData, ...friendRequests];
+                updateFriendRequestsUI();
+                showToast("You have a new friend request! 👋");
                 break;
 
             case 'conversation_created':

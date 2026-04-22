@@ -37,6 +37,14 @@
       "presence": false,
       "join_leave": true,
       "history_size": 0
+    },
+    {
+      "name": "user_notif",
+      "allow_subscribe_for_client": true,
+      "allow_publish_for_client": false,
+      "presence": false,
+      "join_leave": false,
+      "history_size": 0
     }
   ]
 }

@@ -1,6 +1,8 @@
 package ginchat
 
 import (
+	"fmt"
+	"log"
 	"net/http"
 
 	"be-chat-centrifugo/module/chat/business"
@@ -9,10 +11,11 @@ import (
 
 type FriendshipHandler struct {
 	friendBiz *business.FriendshipBusiness
+	publisher business.MessagePublisher
 }
 
-func NewFriendshipHandler(friendBiz *business.FriendshipBusiness) *FriendshipHandler {
-	return &FriendshipHandler{friendBiz: friendBiz}
+func NewFriendshipHandler(friendBiz *business.FriendshipBusiness, publisher business.MessagePublisher) *FriendshipHandler {
+	return &FriendshipHandler{friendBiz: friendBiz, publisher: publisher}
 }
 
 type requestFriendReq struct {
@@ -29,9 +32,24 @@ func (h *FriendshipHandler) Request(c *gin.Context) {
 
 	userID := c.GetString("user_id")
 
-	if err := h.friendBiz.RequestFriend(c.Request.Context(), userID, req.TargetUserID); err != nil {
+	requestID, fromUser, err := h.friendBiz.RequestFriend(c.Request.Context(), userID, req.TargetUserID)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
+	}
+
+	// Publish real-time notification to receiver personal channel.
+	channel := fmt.Sprintf("user_notif:%s", req.TargetUserID)
+	payload := map[string]interface{}{
+		"type": "NEW_FRIEND_REQUEST",
+		"data": map[string]interface{}{
+			"from_user":  fromUser,
+			"request_id": requestID,
+		},
+	}
+	if err := h.publisher.PublishMessage(c.Request.Context(), channel, payload); err != nil {
+		// Do not fail the HTTP request if realtime publish fails; log and allow UI to fallback to polling.
+		log.Printf("[WARN] failed to publish friend request notification to %s: %v", channel, err)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "friend request sent"})

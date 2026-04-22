@@ -11,5 +11,8 @@ type CentrifugoMessagePayload struct {
 	SenderID         string    `json:"sender_id"`
 	SenderName       string    `json:"sender_name"`
 	ContentEncrypted string    `json:"content_encrypted"`
+	KeyForSender     string    `json:"key_for_sender,omitempty"`
+	KeyForReceiver   string    `json:"key_for_receiver,omitempty"`
+	IV               string    `json:"iv,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
 }

@@ -15,6 +15,11 @@ type UserStorage interface {
 	GetUserByID(ctx context.Context, id string) (*model.User, error)
 	UpdateUserPublicKey(ctx context.Context, userID string, publicKey string) error
 	SearchUsers(ctx context.Context, query string, excludeUserID string) ([]model.User, error)
+
+	HasActiveUserDevice(ctx context.Context, userID, fingerprint string) (bool, error)
+	InsertUserDevice(ctx context.Context, d *model.UserDevice) error
+	UpdateUserDeviceLastLogin(ctx context.Context, userID, fingerprint string) error
+	InsertUserDeviceChanged(ctx context.Context, c *model.UserDeviceChanged) error
 }
 
 // ConversationStorage defines the contract for conversation and participant data access.

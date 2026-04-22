@@ -38,9 +38,9 @@ func (s *scyllaStore) InsertMessage(ctx context.Context, msg *model.Message) err
 	msg.CreatedAt = now
 
 	q := s.session.Query(`
-		INSERT INTO messages (conversation_id, created_at, message_id, sender_id, content_encrypted, is_read)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, convID, now, msgID, msg.SenderID, msg.ContentEncrypted, msg.IsRead)
+		INSERT INTO messages (conversation_id, created_at, message_id, sender_id, content_encrypted, key_for_sender, key_for_receiver, iv, is_read)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, convID, now, msgID, msg.SenderID, msg.ContentEncrypted, msg.KeyForSender, msg.KeyForReceiver, msg.IV, msg.IsRead)
 
 	if err := q.WithContext(ctx).Exec(); err != nil {
 		return fmt.Errorf("insert message into ScyllaDB: %w", err)
@@ -67,7 +67,7 @@ func (s *scyllaStore) GetMessages(ctx context.Context, conversationID string, be
 	if beforeTS.IsZero() {
 		// First page: get latest messages
 		query = s.session.Query(`
-			SELECT conversation_id, created_at, message_id, sender_id, content_encrypted, is_read
+			SELECT conversation_id, created_at, message_id, sender_id, content_encrypted, key_for_sender, key_for_receiver, iv, is_read
 			FROM messages
 			WHERE conversation_id = ?
 			ORDER BY created_at DESC
@@ -76,7 +76,7 @@ func (s *scyllaStore) GetMessages(ctx context.Context, conversationID string, be
 	} else {
 		// Subsequent pages: get messages before the given timestamp
 		query = s.session.Query(`
-			SELECT conversation_id, created_at, message_id, sender_id, content_encrypted, is_read
+			SELECT conversation_id, created_at, message_id, sender_id, content_encrypted, key_for_sender, key_for_receiver, iv, is_read
 			FROM messages
 			WHERE conversation_id = ? AND created_at < ?
 			ORDER BY created_at DESC
@@ -93,16 +93,22 @@ func (s *scyllaStore) GetMessages(ctx context.Context, conversationID string, be
 		msgID     gocql.UUID
 		senderID  string
 		content   string
+		keyS      string
+		keyR      string
+		iv        string
 		isRead    bool
 	)
 
-	for iter.Scan(&cID, &createdAt, &msgID, &senderID, &content, &isRead) {
+	for iter.Scan(&cID, &createdAt, &msgID, &senderID, &content, &keyS, &keyR, &iv, &isRead) {
 		messages = append(messages, model.Message{
 			ConversationID:   cID.String(),
 			CreatedAt:        createdAt,
 			MessageID:        msgID.String(),
 			SenderID:         senderID,
 			ContentEncrypted: content,
+			KeyForSender:     keyS,
+			KeyForReceiver:   keyR,
+			IV:               iv,
 			IsRead:           isRead,
 		})
 	}

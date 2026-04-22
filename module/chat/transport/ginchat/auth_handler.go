@@ -22,12 +22,16 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
-	if err := h.authBiz.Register(c.Request.Context(), &req); err != nil {
+	resp, err := h.authBiz.Register(c.Request.Context(), &req)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "user registered successfully"})
+	c.JSON(http.StatusOK, gin.H{
+		"message": "user registered successfully",
+		"data":    resp,
+	})
 }
 
 func (h *AuthHandler) Login(c *gin.Context) {
@@ -37,11 +41,14 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	token, err := h.authBiz.Login(c.Request.Context(), &req)
+	req.UserAgent = c.GetHeader("User-Agent")
+	req.ClientIP = c.ClientIP()
+
+	out, err := h.authBiz.Login(c.Request.Context(), &req)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": token})
+	c.JSON(http.StatusOK, gin.H{"data": out})
 }

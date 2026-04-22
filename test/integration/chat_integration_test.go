@@ -60,11 +60,21 @@ func setupTestDB(t *testing.T) (*gorm.DB, *gocql.Session) {
 		t.Fatalf("failed to connect to postgres (make sure container is running): %v", err)
 	}
 
-	db.Exec("DROP TABLE IF EXISTS participants;")
-	db.Exec("DROP TABLE IF EXISTS conversations;")
-	db.Exec("DROP TABLE IF EXISTS users;")
+	db.Exec("DROP TABLE IF EXISTS user_device_changed CASCADE;")
+	db.Exec("DROP TABLE IF EXISTS user_devices CASCADE;")
+	db.Exec("DROP TABLE IF EXISTS friendships CASCADE;")
+	db.Exec("DROP TABLE IF EXISTS participants CASCADE;")
+	db.Exec("DROP TABLE IF EXISTS conversations CASCADE;")
+	db.Exec("DROP TABLE IF EXISTS users CASCADE;")
 
-	err = db.AutoMigrate(&model.User{}, &model.Conversation{}, &model.Participant{})
+	err = db.AutoMigrate(
+		&model.User{},
+		&model.UserDevice{},
+		&model.UserDeviceChanged{},
+		&model.Conversation{},
+		&model.Participant{},
+		&model.Friendship{},
+	)
 	if err != nil {
 		t.Fatalf("failed to auto migrate postgres: %v", err)
 	}
@@ -78,6 +88,11 @@ func setupTestDB(t *testing.T) (*gorm.DB, *gocql.Session) {
 		t.Fatalf("failed to connect to scylladb (make sure container is running): %v", err)
 	}
 
+	_ = session.Query(`ALTER TABLE messages DROP encrypted_aes_key`).Exec()
+	_ = session.Query(`ALTER TABLE messages ADD key_for_sender text`).Exec()
+	_ = session.Query(`ALTER TABLE messages ADD key_for_receiver text`).Exec()
+	_ = session.Query(`ALTER TABLE messages ADD iv text`).Exec()
+
 	return db, session
 }
 
@@ -89,6 +104,7 @@ func TestChatServiceIntegration(t *testing.T) {
 	username := fmt.Sprintf("testuser_%d", time.Now().UnixNano())
 	username2 := fmt.Sprintf("testuser2_%d", time.Now().UnixNano())
 	password := "password123"
+	masterKey := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
 	// Init Repositories
 	postgresStore := storage.NewPostgresStore(db)
@@ -99,21 +115,23 @@ func TestChatServiceIntegration(t *testing.T) {
 	mockPresence := &mockPresenceStore{}
 
 	// Init Business layers — postgresStore satisfies both ConversationStorage and UserStorage
-	authBiz := business.NewAuthBusiness(postgresStore, jwtSecret)
+	authBiz := business.NewAuthBusiness(postgresStore, jwtSecret, masterKey)
 	chatBiz := business.NewChatBusiness(scyllaStore, mockPub, postgresStore, postgresStore, mockPresence, 0)
+	friendBiz := business.NewFriendshipBusiness(postgresStore, postgresStore, postgresStore, mockPub)
 
 	// Init Handlers
 	authHandler := ginchat.NewAuthHandler(authBiz)
 	chatHandler := ginchat.NewChatHandler(chatBiz)
 	convHandler := ginchat.NewConversationHandler(chatBiz)
-	userHandler := ginchat.NewUserHandler(chatBiz)
+	userHandler := ginchat.NewUserHandler(chatBiz, friendBiz)
 	presenceHandler := ginchat.NewPresenceHandler(chatBiz)
 	webhookHandler := ginchat.NewWebhookHandler(chatBiz)
+	friendHandler := ginchat.NewFriendshipHandler(friendBiz, mockPub)
 
 	// Setup Gin
 	gin.SetMode(gin.TestMode)
 	r := gin.Default()
-	routes.SetupRoutes(r, authHandler, chatHandler, convHandler, userHandler, presenceHandler, webhookHandler, jwtSecret)
+	routes.SetupRoutes(r, authHandler, chatHandler, convHandler, userHandler, presenceHandler, webhookHandler, friendHandler, jwtSecret)
 
 	var token string
 	var userID string
@@ -123,9 +141,8 @@ func TestChatServiceIntegration(t *testing.T) {
 	t.Run("Test Case 1: Register, Login, verify JWT", func(t *testing.T) {
 		// --- Register user 1 ---
 		regReq := business.RegisterReq{
-			Username:  username,
-			Password:  password,
-			PublicKey: "sample_public_key",
+			Username: username,
+			Password: password,
 		}
 		b, _ := json.Marshal(regReq)
 		req, _ := http.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewBuffer(b))
@@ -140,9 +157,8 @@ func TestChatServiceIntegration(t *testing.T) {
 
 		// --- Register user 2 (for group tests) ---
 		regReq2 := business.RegisterReq{
-			Username:  username2,
-			Password:  password,
-			PublicKey: "sample_public_key_2",
+			Username: username2,
+			Password: password,
 		}
 		b2, _ := json.Marshal(regReq2)
 		req2, _ := http.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewBuffer(b2))
@@ -163,6 +179,8 @@ func TestChatServiceIntegration(t *testing.T) {
 		b, _ = json.Marshal(loginReq)
 		req, _ = http.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewBuffer(b))
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", "integration-test")
+		req.RemoteAddr = "127.0.0.1:12345"
 
 		w = httptest.NewRecorder()
 		r.ServeHTTP(w, req)
@@ -177,9 +195,17 @@ func TestChatServiceIntegration(t *testing.T) {
 			t.Fatalf("failed to decode login response: %v", err)
 		}
 
-		tokenRaw, ok := loginResp["data"].(string)
+		data, ok := loginResp["data"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected data object in login response, got: %v", loginResp)
+		}
+		tokenRaw, ok := data["token"].(string)
 		if !ok || tokenRaw == "" {
-			t.Fatalf("expected token in login response, got: %v", loginResp)
+			t.Fatalf("expected token in login data, got: %v", data)
+		}
+		priv, _ := data["private_key"].(string)
+		if priv == "" {
+			t.Fatalf("expected private_key in login data")
 		}
 		token = tokenRaw
 

@@ -42,9 +42,17 @@ func NewChatBusiness(
 // --- Send Message ---
 
 // SendMessageReq is the input for sending a message in a conversation.
+// Hybrid E2EE: AES-GCM ciphertext in content_encrypted.
+// Session key is wrapped twice (RSA-OAEP):
+// - key_for_receiver: wrapped with receiver's public key
+// - key_for_sender: wrapped with sender's public key (self-decryption/history)
+// IV is in iv.
 type SendMessageReq struct {
 	ConversationID   string `json:"conversation_id" binding:"required"`
 	ContentEncrypted string `json:"content_encrypted" binding:"required"`
+	KeyForSender     string `json:"key_for_sender"`
+	KeyForReceiver   string `json:"key_for_receiver"`
+	IV               string `json:"iv"`
 }
 
 // SendMessage persists a message to ScyllaDB and publishes it to Centrifugo
@@ -55,6 +63,9 @@ func (biz *ChatBusiness) SendMessage(ctx context.Context, senderID string, req *
 		ConversationID:   req.ConversationID,
 		SenderID:         senderID,
 		ContentEncrypted: req.ContentEncrypted,
+		KeyForSender:     req.KeyForSender,
+		KeyForReceiver:   req.KeyForReceiver,
+		IV:               req.IV,
 		IsRead:           false,
 	}
 
@@ -78,6 +89,9 @@ func (biz *ChatBusiness) SendMessage(ctx context.Context, senderID string, req *
 		SenderID:         senderID,
 		SenderName:       senderName,
 		ContentEncrypted: msg.ContentEncrypted,
+		KeyForSender:     msg.KeyForSender,
+		KeyForReceiver:   msg.KeyForReceiver,
+		IV:               msg.IV,
 		CreatedAt:        msg.CreatedAt,
 	}
 

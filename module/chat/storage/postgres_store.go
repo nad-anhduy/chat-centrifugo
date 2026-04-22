@@ -56,6 +56,45 @@ func (s *postgresStore) UpdateUserPublicKey(ctx context.Context, userID string, 
 	return nil
 }
 
+// HasActiveUserDevice reports whether this fingerprint is already registered as active for the user.
+func (s *postgresStore) HasActiveUserDevice(ctx context.Context, userID, fingerprint string) (bool, error) {
+	var n int64
+	err := s.db.WithContext(ctx).Model(&model.UserDevice{}).
+		Where("user_id = ? AND device_fingerprint = ? AND status = ?", userID, fingerprint, model.UserDeviceStatusActive).
+		Count(&n).Error
+	if err != nil {
+		return false, fmt.Errorf("check user device: %w", err)
+	}
+	return n > 0, nil
+}
+
+// InsertUserDevice inserts a new device row.
+func (s *postgresStore) InsertUserDevice(ctx context.Context, d *model.UserDevice) error {
+	if err := s.db.WithContext(ctx).Create(d).Error; err != nil {
+		return fmt.Errorf("insert user device: %w", err)
+	}
+	return nil
+}
+
+// UpdateUserDeviceLastLogin bumps last_login for an existing active device fingerprint.
+func (s *postgresStore) UpdateUserDeviceLastLogin(ctx context.Context, userID, fingerprint string) error {
+	res := s.db.WithContext(ctx).Model(&model.UserDevice{}).
+		Where("user_id = ? AND device_fingerprint = ? AND status = ?", userID, fingerprint, model.UserDeviceStatusActive).
+		Update("last_login", time.Now())
+	if res.Error != nil {
+		return fmt.Errorf("update user device last_login: %w", res.Error)
+	}
+	return nil
+}
+
+// InsertUserDeviceChanged appends an audit row for a new or changed device context.
+func (s *postgresStore) InsertUserDeviceChanged(ctx context.Context, c *model.UserDeviceChanged) error {
+	if err := s.db.WithContext(ctx).Create(c).Error; err != nil {
+		return fmt.Errorf("insert user_device_changed: %w", err)
+	}
+	return nil
+}
+
 // --- Conversation operations ---
 
 // CreateConversation persists a new conversation record.
@@ -244,14 +283,15 @@ func (s *postgresStore) GetFriendship(ctx context.Context, id string) (*model.Fr
 
 func (s *postgresStore) GetFriendshipBetween(ctx context.Context, user1ID, user2ID string) (*model.Friendship, error) {
 	var f model.Friendship
-	err := s.db.WithContext(ctx).
+	tx := s.db.WithContext(ctx).
 		Where("(requester_id = ? AND receiver_id = ?) OR (requester_id = ? AND receiver_id = ?)", user1ID, user2ID, user2ID, user1ID).
-		First(&f).Error
-	if err != nil {
-		if err == gorm.ErrRecordNotFound {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("get friendship between %q and %q: %w", user1ID, user2ID, err)
+		Limit(1).
+		Find(&f)
+	if tx.Error != nil {
+		return nil, fmt.Errorf("get friendship between %q and %q: %w", user1ID, user2ID, tx.Error)
+	}
+	if tx.RowsAffected == 0 {
+		return nil, nil
 	}
 	return &f, nil
 }

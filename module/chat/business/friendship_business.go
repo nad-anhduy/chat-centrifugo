@@ -10,10 +10,10 @@ import (
 )
 
 type FriendshipBusiness struct {
-	friendStore   FriendshipStorage
-	userStore     UserStorage
-	convStore     ConversationStorage
-	publisher     MessagePublisher
+	friendStore FriendshipStorage
+	userStore   UserStorage
+	convStore   ConversationStorage
+	publisher   MessagePublisher
 }
 
 func NewFriendshipBusiness(friendStore FriendshipStorage, userStore UserStorage, convStore ConversationStorage, publisher MessagePublisher) *FriendshipBusiness {
@@ -35,29 +35,38 @@ func (biz *FriendshipBusiness) GetPendingRequests(ctx context.Context, userID st
 }
 
 // RequestFriend sends a friend request from requester to receiver.
-func (biz *FriendshipBusiness) RequestFriend(ctx context.Context, requesterID, receiverID string) error {
+func (biz *FriendshipBusiness) RequestFriend(ctx context.Context, requesterID, receiverID string) (requestID string, fromUser string, err error) {
 	if requesterID == receiverID {
-		return fmt.Errorf("cannot send friend request to yourself")
+		return "", "", fmt.Errorf("cannot send friend request to yourself")
 	}
 
 	// Check if already friends or requested
 	existing, err := biz.friendStore.GetFriendshipBetween(ctx, requesterID, receiverID)
 	if err != nil {
-		return fmt.Errorf("check existing friendship: %w", err)
+		return "", "", fmt.Errorf("check existing friendship: %w", err)
 	}
 
 	if existing != nil {
 		if existing.Status == model.FriendshipStatusPending {
-			return fmt.Errorf("friend request already pending")
+			return "", "", fmt.Errorf("friend request already pending")
 		}
 		if existing.Status == model.FriendshipStatusAccepted {
-			return fmt.Errorf("already friends")
+			return "", "", fmt.Errorf("already friends")
 		}
 		// If rejected, we might allow re-request, but let's just update it
 		if existing.Status == model.FriendshipStatusRejected {
 			// for simplicity, we could update status, but we'll assume we error out or just recreate.
 			// we'll update it to pending
-			return biz.friendStore.UpdateFriendshipStatus(ctx, existing.ID, model.FriendshipStatusPending)
+			if err := biz.friendStore.UpdateFriendshipStatus(ctx, existing.ID, model.FriendshipStatusPending); err != nil {
+				return "", "", err
+			}
+			// Returning existing request id so controller can publish.
+			requester, _ := biz.userStore.GetUserByID(ctx, requesterID)
+			from := requesterID
+			if requester != nil {
+				from = requester.Username
+			}
+			return existing.ID, from, nil
 		}
 	}
 
@@ -68,18 +77,16 @@ func (biz *FriendshipBusiness) RequestFriend(ctx context.Context, requesterID, r
 	}
 
 	if err := biz.friendStore.CreateFriendship(ctx, f); err != nil {
-		return fmt.Errorf("create friend request: %w", err)
+		return "", "", fmt.Errorf("create friend request: %w", err)
 	}
 
-	// Notify receiver via personal channel
-	channel := fmt.Sprintf("user:#%s", receiverID)
-	payload := map[string]interface{}{
-		"type": "friend_request_received",
-		"requester_id": requesterID,
+	requester, _ := biz.userStore.GetUserByID(ctx, requesterID)
+	from := requesterID
+	if requester != nil {
+		from = requester.Username
 	}
-	biz.publisher.PublishMessage(ctx, channel, payload)
 
-	return nil
+	return f.ID, from, nil
 }
 
 // AcceptFriendRequest accepts an existing friend request and handles conversation creation.
@@ -139,8 +146,8 @@ func (biz *FriendshipBusiness) AcceptFriendRequest(ctx context.Context, userID, 
 }
 
 func (biz *FriendshipBusiness) publishConversationCreated(ctx context.Context, targetUserID string, conv *model.Conversation, peerID string, peerUser *model.User) {
-	channel := fmt.Sprintf("user:#%s", targetUserID)
-	
+	channel := fmt.Sprintf("user_notif:%s", targetUserID)
+
 	// Default name fallback
 	peerName := peerID
 	peerPublicKey := ""
@@ -184,4 +191,3 @@ func (biz *FriendshipBusiness) RejectFriendRequest(ctx context.Context, userID, 
 
 	return nil
 }
-

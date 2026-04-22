@@ -33,10 +33,10 @@ export const api = {
                 body: JSON.stringify({ username, password })
             });
         },
-        register: async (username, password, public_key) => {
+        register: async (username, password) => {
             return request('/auth/register', {
                 method: 'POST',
-                body: JSON.stringify({ username, password, public_key })
+                body: JSON.stringify({ username, password })
             });
         }
     },
@@ -78,10 +78,10 @@ export const api = {
         }
     },
     chat: {
-        sendMessage: async (conversation_id, content_encrypted) => {
+        sendMessage: async (conversation_id, content_encrypted, key_for_sender = '', key_for_receiver = '', iv = '') => {
             return request('/chat/messages', {
                 method: 'POST',
-                body: JSON.stringify({ conversation_id, content_encrypted })
+                body: JSON.stringify({ conversation_id, content_encrypted, key_for_sender, key_for_receiver, iv })
             });
         }
     },

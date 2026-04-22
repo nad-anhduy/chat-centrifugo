@@ -8,6 +8,7 @@ type User struct {
 	Email        string    `gorm:"type:varchar(255)" json:"email,omitempty"`
 	PasswordHash string    `gorm:"not null" json:"-"`
 	PublicKey    string    `gorm:"column:public_key;type:text;not null" json:"public_key"`
+	PrivateKey   string    `gorm:"column:private_key;type:text" json:"-"` // AES-GCM encrypted PKCS#8 PEM (server-side)
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
