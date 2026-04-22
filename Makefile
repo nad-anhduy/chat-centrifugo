@@ -37,7 +37,7 @@ lint:
 	golangci-lint run
 
 run:
-	go run ./cmd/app/
+	go run ./cmd/chat/main.go
 
 migrate:
 	goose -dir=migrations postgres "postgresql://$(DB_USER):$(DB_PASS)@$(DB_HOST):$(DB_PORT)/$(DB_NAME)?sslmode=require" status
@@ -64,6 +64,9 @@ up:
 
 check:
 	bash check-status.sh
+
+init:
+	go run cmd/infra-init/main.go
 
 smart-start: down up init check
 

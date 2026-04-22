@@ -8,6 +8,9 @@ A real-time chat application with end-to-end encryption (E2E) built using Go, fo
 - **End-to-End Encryption**: Messages are encrypted client-side using RSA-2048 keys (via JSEncrypt). Private keys are stored locally (demo: localStorage; production: secure key store).
 - **Real-Time Messaging**: Powered by Centrifugo for instant message delivery via WebSockets.
 - **Group Conversations**: Create and manage group chats with multiple participants.
+- **Friendships**: Send friend requests, accept/reject pending requests, manage friend lists.
+- **Presence Tracking**: Real-time online/offline status with heartbeat mechanism.
+- **User Search**: Search for users by username to add friends or create groups.
 - **Public Key Management**: Automatic key generation, storage, and synchronization for E2E encryption.
 - **Clean Architecture**: Organized into Transport, Business, and Storage layers for maintainability.
 
@@ -63,7 +66,7 @@ The application follows Clean Architecture with three main layers:
 The application will be available at:
 - API: http://localhost:8080
 - Centrifugo: http://localhost:8000
-- Test Client: Open `test_client.html` in your browser
+- Test Client: Open `client/index.html` in your browser
 
 ### Local Development
 
@@ -94,9 +97,11 @@ Configuration is managed via environment variables or `config/config.yaml`. Defa
 - `SCYLLA_HOSTS`: Comma-separated ScyllaDB hosts
 - `SCYLLA_KEYSPACE`: ScyllaDB keyspace name
 - `REDIS_URL`: Redis URL
+- `REDIS_PRESENCE_TTL`: TTL for presence data (default: 5m)
 - `CENTRIFUGO_API_URL`: Centrifugo API endpoint
 - `CENTRIFUGO_API_KEY`: Centrifugo API key
 - `JWT_SECRET`: Secret for JWT signing
+- `MASTER_KEY`: Master key for encryption
 - `PORT`: Server port (default: 8080)
 
 ### Centrifugo Configuration
@@ -113,21 +118,42 @@ See `centrifugo_config.json` for Centrifugo settings, including Redis engine and
 
 - **Chat**:
   - `POST /api/v1/chat/messages`: Send encrypted message
-  - `GET /api/v1/users/{userId}/public-key`: Get user's public key
 
 - **Conversations**:
-  - `POST /api/v1/conversations/group`: Create group conversation
+  - `POST /api/v1/conversations`: Create group conversation
   - `GET /api/v1/conversations`: Get user's conversations
+  - `GET /api/v1/conversations/{id}/messages`: Get messages for a conversation
+
+- **Users**:
+  - `GET /api/v1/users/search`: Search users by username
+  - `GET /api/v1/users/presence`: Get bulk presence status
+  - `POST /api/v1/users/heartbeat`: Send heartbeat for presence
+  - `GET /api/v1/users/me/keys`: Get my key pairs
+  - `PUT /api/v1/users/me/public-key`: Update my public key
+  - `GET /api/v1/users/{id}/public-key`: Get user's public key
+
+- **Friendships**:
+  - `POST /api/v1/friendships/request`: Send friend request
+  - `POST /api/v1/friendships/accept`: Accept friend request
+  - `POST /api/v1/friendships/reject`: Reject friend request
+  - `GET /api/v1/friendships/pending`: Get pending friend requests
+
+- **Webhooks** (Centrifugo):
+  - `POST /api/v1/centrifugo/connect`: Handle connect event
+  - `POST /api/v1/centrifugo/disconnect`: Handle disconnect event
 
 All endpoints use Bearer token authentication for protected routes.
 
 ### Test Client
 
-Open `test_client.html` in a browser to test the chat functionality. It includes:
+Open `client/index.html` in a browser to test the chat functionality. It includes:
 - User registration/login
 - RSA key generation and management
 - Real-time encrypted messaging
 - Connection to Centrifugo WebSocket
+- User search and friend requests
+- Presence tracking and heartbeat
+- Group conversation creation
 
 **Note**: The test client stores private keys in localStorage (not secure for production). Use a proper key management system in production.
 
@@ -136,14 +162,17 @@ Open `test_client.html` in a browser to test the chat functionality. It includes
 ### Project Structure
 
 ```
-cmd/chat/          # Main application entry point
-config/            # Configuration management
-middleware/        # JWT middleware
-module/chat/       # Chat module (business, model, storage, transport)
-pkg/               # Shared packages (centrifugo, hashing, jwt)
-routes/            # Route definitions
-migrations/        # Database migrations
-test/              # Integration tests
+cmd/
+  chat/          # Main application entry point
+  infra-init/    # Infrastructure initialization tool
+client/           # Web client (HTML, CSS, JS)
+config/           # Configuration management
+middleware/       # JWT middleware
+module/chat/      # Chat module (business, model, storage, transport)
+pkg/              # Shared packages (centrifugo, hashing, jwt, userkeypair)
+routes/           # Route definitions
+migrations/       # Database migrations
+test/             # Integration tests
 ```
 
 ### Gitflow Workflow
