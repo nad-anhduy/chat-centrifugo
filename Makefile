@@ -61,8 +61,6 @@ down:
 up:
 	docker-compose up -d
 
-init:
-	bash init-infra.sh
 
 check:
 	bash check-status.sh

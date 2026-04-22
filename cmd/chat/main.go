@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -15,17 +14,11 @@ import (
 
 	"be-chat-centrifugo/config"
 	"be-chat-centrifugo/module/chat/business"
-	"be-chat-centrifugo/module/chat/model"
 	"be-chat-centrifugo/module/chat/storage"
 	"be-chat-centrifugo/module/chat/transport/ginchat"
 	"be-chat-centrifugo/pkg/centrifugo"
 	"be-chat-centrifugo/routes"
 )
-
-func EnsureKeyspace(session *gocql.Session, keyspace string) error {
-	query := fmt.Sprintf("CREATE KEYSPACE IF NOT EXISTS %s WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1};", keyspace)
-	return session.Query(query).Exec()
-}
 
 func main() {
 	cfg, err := config.LoadConfig("config/config.yaml")
@@ -39,46 +32,23 @@ func main() {
 		log.Fatalf("failed to connect to postgres: %v", err)
 	}
 
-	err = db.AutoMigrate(
-		&model.User{},
-		&model.UserDevice{},
-		&model.UserDeviceChanged{},
-		&model.Conversation{},
-		&model.Participant{},
-		&model.Friendship{},
-	)
-	if err != nil {
-		log.Fatalf("failed to auto migrate postgres: %v", err)
-	}
-
 	// 2. Setup ScyllaDB
 	cluster := gocql.NewCluster(strings.Split(cfg.ScyllaHosts, ",")...)
 	cluster.Consistency = gocql.Quorum
+	cluster.Keyspace = cfg.ScyllaKeyspace
 
-	var initSession *gocql.Session
+	var session *gocql.Session
 	var errScylla error
 	for i := 1; i <= 15; i++ {
-		initSession, errScylla = cluster.CreateSession()
+		session, errScylla = cluster.CreateSession()
 		if errScylla == nil {
 			break
 		}
-		log.Printf("Failed to connect to ScyllaDB (attempt %d/15): %v. Retrying in 5 seconds...", i, errScylla)
+		log.Printf("Failed to connect to ScyllaDB with keyspace %s (attempt %d/15): %v. Retrying in 5 seconds...", cfg.ScyllaKeyspace, i, errScylla)
 		time.Sleep(5 * time.Second)
 	}
 	if errScylla != nil {
 		log.Fatalf("failed to connect to scylladb after 15 attempts: %v", errScylla)
-	}
-
-	if err := EnsureKeyspace(initSession, cfg.ScyllaKeyspace); err != nil {
-		log.Fatalf("failed to execute EnsureKeyspace: %v", err)
-	}
-	initSession.Close()
-
-	// Re-connect with keyspace active
-	cluster.Keyspace = cfg.ScyllaKeyspace
-	session, err := cluster.CreateSession()
-	if err != nil {
-		log.Fatalf("failed to connect to scylladb with keyspace: %v", err)
 	}
 	defer session.Close()
 

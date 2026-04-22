@@ -21,7 +21,7 @@ services:
         condition: service_started
       scylladb:
         condition: service_healthy
-      scylla-init:
+      infra-init:
         condition: service_completed_successfully
     networks:
       - chat_network
@@ -34,7 +34,6 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
       - postgres_data:/var/lib/postgresql/data
     networks:
       - chat_network
@@ -50,7 +49,6 @@ services:
     ports:
       - "9042:9042"
     volumes:
-      - ./init-scylla.cql:/docker-entrypoint-initdb.d/init-scylla.cql
       - scylla_data:/var/lib/scylla
     networks:
       - chat_network
@@ -60,16 +58,21 @@ services:
       timeout: 5s
       retries: 10
 
-  scylla-init:
-    image: scylladb/scylla:latest
+  infra-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
     networks:
       - chat_network
     depends_on:
+      postgres:
+        condition: service_healthy
       scylladb:
         condition: service_healthy
     volumes:
-      - ./init-scylla.cql:/init-scylla.cql
-    entrypoint: cqlsh scylladb -f /init-scylla.cql
+      - ./migrations:/app/migrations
+      - ./config/config.yaml:/app/config/config.yaml
+    entrypoint: ["/app/infra-init"]
 
   redis:
     image: redis:7-alpine
