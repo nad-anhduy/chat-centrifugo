@@ -31,6 +31,18 @@
       "history_ttl": "24h"
     },
     {
+      "name": "groups",
+      "allow_subscribe_for_client": true,
+      "allow_publish_for_client": true,
+      "presence": true,
+      "allow_presence_for_subscriber": true,
+      "allow_presence_for_client": true,
+      "join_leave": true,
+      "force_push_join_leave": true,
+      "history_size": 100,
+      "history_ttl": "24h"
+    },
+    {
       "name": "user",
       "allow_subscribe_for_client": true,
       "allow_publish_for_client": false,

@@ -15,9 +15,11 @@ type ChatBusiness struct {
 	msgStore      MessageStorage
 	publisher     MessagePublisher
 	convStore     ConversationStorage
+	groupStore    GroupStorage
 	userStore     UserStorage
 	presenceStore PresenceStorage
 	presenceTTL   time.Duration
+	masterKey     string
 }
 
 // NewChatBusiness creates a new ChatBusiness with all required dependencies.
@@ -25,17 +27,21 @@ func NewChatBusiness(
 	msgStore MessageStorage,
 	publisher MessagePublisher,
 	convStore ConversationStorage,
+	groupStore GroupStorage,
 	userStore UserStorage,
 	presenceStore PresenceStorage,
 	presenceTTL time.Duration,
+	masterKey string,
 ) *ChatBusiness {
 	return &ChatBusiness{
 		msgStore:      msgStore,
 		publisher:     publisher,
 		convStore:     convStore,
+		groupStore:    groupStore,
 		userStore:     userStore,
 		presenceStore: presenceStore,
 		presenceTTL:   presenceTTL,
+		masterKey:     masterKey,
 	}
 }
 
@@ -58,15 +64,28 @@ type SendMessageReq struct {
 // SendMessage persists a message to ScyllaDB and publishes it to Centrifugo
 // for real-time delivery. The storage layer generates MessageID and CreatedAt.
 func (biz *ChatBusiness) SendMessage(ctx context.Context, senderID string, req *SendMessageReq) error {
+	conv, err := biz.convStore.GetConversationByID(ctx, req.ConversationID)
+	if err != nil {
+		return fmt.Errorf("get conversation %q: %w", req.ConversationID, err)
+	}
+
 	// Construct message — MessageID and CreatedAt will be set by InsertMessage.
 	msg := &model.Message{
 		ConversationID:   req.ConversationID,
+		GroupID:          "",
 		SenderID:         senderID,
 		ContentEncrypted: req.ContentEncrypted,
 		KeyForSender:     req.KeyForSender,
 		KeyForReceiver:   req.KeyForReceiver,
 		IV:               req.IV,
 		IsRead:           false,
+	}
+
+	channelPrefix := "chat"
+	if conv.Type == model.ConversationTypeGroup {
+		// For group messages, we persist group_id for downstream audit/tools.
+		msg.GroupID = req.ConversationID
+		channelPrefix = "groups"
 	}
 
 	// Persist to ScyllaDB
@@ -86,6 +105,7 @@ func (biz *ChatBusiness) SendMessage(ctx context.Context, senderID string, req *
 	payload := &dto.CentrifugoMessagePayload{
 		MessageID:        msg.MessageID,
 		ConversationID:   msg.ConversationID,
+		GroupID:          msg.GroupID,
 		SenderID:         senderID,
 		SenderName:       senderName,
 		ContentEncrypted: msg.ContentEncrypted,
@@ -97,7 +117,7 @@ func (biz *ChatBusiness) SendMessage(ctx context.Context, senderID string, req *
 
 	// Publish to Centrifugo. If publish fails, the message is still persisted —
 	// we log the error but do not fail the request.
-	channel := fmt.Sprintf("chat:%s", req.ConversationID)
+	channel := fmt.Sprintf("%s:%s", channelPrefix, req.ConversationID)
 	if err := biz.publisher.PublishMessage(ctx, channel, payload); err != nil {
 		log.Printf("[WARN] message %s persisted but failed to publish to Centrifugo: %v", msg.MessageID, err)
 	}
@@ -254,9 +274,13 @@ func (biz *ChatBusiness) broadcastPresence(ctx context.Context, userID string, s
 	}
 
 	for _, convID := range convIDs {
-		channel := fmt.Sprintf("chat:%s", convID)
-		if err := biz.publisher.PublishMessage(ctx, channel, payload); err != nil {
-			log.Printf("[WARN] failed to broadcast presence to channel %s: %v", channel, err)
+		// Broadcast to both namespaces. Clients subscribe to either `chat:` (DIRECT)
+		// or `groups:` (GROUP), depending on conversation type.
+		for _, prefix := range []string{"chat", "groups"} {
+			channel := fmt.Sprintf("%s:%s", prefix, convID)
+			if err := biz.publisher.PublishMessage(ctx, channel, payload); err != nil {
+				log.Printf("[WARN] failed to broadcast presence to channel %s: %v", channel, err)
+			}
 		}
 	}
 }

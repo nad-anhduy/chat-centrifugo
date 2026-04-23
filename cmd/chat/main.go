@@ -83,13 +83,14 @@ func main() {
 
 	// 6. Initialize Services (Business Layer)
 	authBiz := business.NewAuthBusiness(postgresStore, cfg.JWTSecret, cfg.MasterKey)
-	chatBiz := business.NewChatBusiness(scyllaStore, publisher, postgresStore, postgresStore, redisStore, presenceTTL)
+	chatBiz := business.NewChatBusiness(scyllaStore, publisher, postgresStore, postgresStore, postgresStore, redisStore, presenceTTL, cfg.MasterKey)
 	friendBiz := business.NewFriendshipBusiness(postgresStore, postgresStore, postgresStore, publisher)
 
 	// 7. Initialize Handlers (Transport Layer)
 	authHandler := ginchat.NewAuthHandler(authBiz)
 	chatHandler := ginchat.NewChatHandler(chatBiz)
 	convHandler := ginchat.NewConversationHandler(chatBiz)
+	groupHandler := ginchat.NewGroupHandler(chatBiz)
 	userHandler := ginchat.NewUserHandler(chatBiz, friendBiz)
 	friendHandler := ginchat.NewFriendshipHandler(friendBiz, publisher)
 	presenceHandler := ginchat.NewPresenceHandler(chatBiz)
@@ -110,7 +111,7 @@ func main() {
 		c.Next()
 	})
 
-	routes.SetupRoutes(r, authHandler, chatHandler, convHandler, userHandler, presenceHandler, webhookHandler, friendHandler, cfg.JWTSecret)
+	routes.SetupRoutes(r, authHandler, chatHandler, convHandler, groupHandler, userHandler, presenceHandler, webhookHandler, friendHandler, cfg.JWTSecret)
 
 	routes.RegisterHealthCheck(r, db, session, c)
 

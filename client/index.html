@@ -101,23 +101,37 @@
                     </div>
                 </div>
 
-                <div class="chat-messages" id="chat-messages">
-                    <div id="loading-history" class="loading-history hidden">Loading older messages...</div>
-                    <div id="messages-container" style="display: flex; flex-direction: column; gap: 10px; padding-bottom: 10px;">
-                        <!-- Messages go here -->
-                    </div>
-                </div>
+                <div id="chat-body" class="chat-body">
+                    <div class="chat-main">
+                        <div class="chat-messages" id="chat-messages">
+                            <div id="loading-history" class="loading-history hidden">Loading older messages...</div>
+                            <div id="messages-container" style="display: flex; flex-direction: column; gap: 10px; padding-bottom: 10px;">
+                                <!-- Messages go here -->
+                            </div>
+                        </div>
 
-                <div class="chat-input-area">
-                    <div class="chat-input-wrapper">
-                        <input type="text" id="msg-input" placeholder="Type an encrypted message..." autocomplete="off">
+                        <div class="chat-input-area">
+                            <div class="chat-input-wrapper">
+                                <input type="text" id="msg-input" placeholder="Type an encrypted message..." autocomplete="off">
+                            </div>
+                            <button class="send-btn" id="btn-send" disabled>
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <line x1="22" y1="2" x2="11" y2="13"></line>
+                                    <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                                </svg>
+                            </button>
+                        </div>
                     </div>
-                    <button class="send-btn" id="btn-send" disabled>
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <line x1="22" y1="2" x2="11" y2="13"></line>
-                            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-                        </svg>
-                    </button>
+
+                    <aside id="group-info-panel" class="group-info-panel hidden">
+                        <div class="group-info-header">
+                            <div class="group-info-title">Group members</div>
+                            <button id="btn-close-info" class="icon-btn" type="button" title="Close">✕</button>
+                        </div>
+
+                        <div id="group-members-loading" class="group-info-loading hidden">Loading members…</div>
+                        <div id="group-members-list" class="group-members-list"></div>
+                    </aside>
                 </div>
 
             </div>
@@ -127,15 +141,42 @@
     <!-- CREATE CONVERSATION DIALOG -->
     <div id="dialog-new-chat" class="dialog-overlay" style="display: none;">
         <div class="dialog-box">
-            <h2 style="margin-bottom: 1rem; font-size: 1.2rem;">New Group Chat</h2>
-            <div style="margin-bottom: 1rem;">
-                <label style="display:block; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.5rem;">Group Name</label>
+            <div class="dialog-titlebar">
+                <h2 class="dialog-title">New Group Chat</h2>
+                <button id="btn-close-group" class="icon-btn" title="Close" type="button">✕</button>
+            </div>
+
+            <div class="dialog-section">
+                <label class="dialog-label" for="new-group-name">Group Name</label>
                 <input type="text" id="new-group-name" class="auth-input" placeholder="e.g. Secret Project">
             </div>
-            <div style="margin-bottom: 1rem;">
-                <label style="display:block; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 0.5rem;">Member User IDs (comma separated)</label>
-                <input type="text" id="new-group-members" class="auth-input" placeholder="uuid-1, uuid-2">
+
+            <div class="dialog-section">
+                <div class="dialog-label-row">
+                    <label class="dialog-label">Members</label>
+                    <div id="group-member-count" class="dialog-hint">0 selected</div>
+                </div>
+
+                <div id="group-member-chips" class="chips-wrap" aria-label="Selected members">
+                    <div class="chips-empty">Search and add members below.</div>
+                </div>
+
+                <div class="member-search">
+                    <input type="text" id="group-member-search" class="auth-input" placeholder="Search users by username..." autocomplete="off">
+                    <div id="group-member-results" class="dropdown" style="display:none;"></div>
+                </div>
+
+                <div id="group-create-error" class="form-error" style="display:none;"></div>
+
+                <details class="dialog-advanced">
+                    <summary>Advanced: add members by UUID</summary>
+                    <div class="dialog-hint" style="margin: 8px 0 10px;">
+                        Use this only if you can’t find a user via search. Comma-separated UUIDs.
+                    </div>
+                    <input type="text" id="new-group-members" class="auth-input" placeholder="uuid-1, uuid-2">
+                </details>
             </div>
+
             <div style="display: flex; gap: 1rem; margin-top: 1.5rem;">
                 <button id="btn-cancel-group" class="auth-btn auth-btn-outline" style="flex:1;">Cancel</button>
                 <button id="btn-create-group" class="auth-btn" style="flex:1;">Create</button>

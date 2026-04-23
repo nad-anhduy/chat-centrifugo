@@ -92,6 +92,7 @@ func setupTestDB(t *testing.T) (*gorm.DB, *gocql.Session) {
 	_ = session.Query(`ALTER TABLE messages ADD key_for_sender text`).Exec()
 	_ = session.Query(`ALTER TABLE messages ADD key_for_receiver text`).Exec()
 	_ = session.Query(`ALTER TABLE messages ADD iv text`).Exec()
+	_ = session.Query(`ALTER TABLE messages ADD group_id uuid`).Exec()
 
 	return db, session
 }
@@ -116,7 +117,7 @@ func TestChatServiceIntegration(t *testing.T) {
 
 	// Init Business layers — postgresStore satisfies both ConversationStorage and UserStorage
 	authBiz := business.NewAuthBusiness(postgresStore, jwtSecret, masterKey)
-	chatBiz := business.NewChatBusiness(scyllaStore, mockPub, postgresStore, postgresStore, mockPresence, 0)
+	chatBiz := business.NewChatBusiness(scyllaStore, mockPub, postgresStore, postgresStore, postgresStore, mockPresence, 0, masterKey)
 	friendBiz := business.NewFriendshipBusiness(postgresStore, postgresStore, postgresStore, mockPub)
 
 	// Init Handlers
@@ -131,7 +132,8 @@ func TestChatServiceIntegration(t *testing.T) {
 	// Setup Gin
 	gin.SetMode(gin.TestMode)
 	r := gin.Default()
-	routes.SetupRoutes(r, authHandler, chatHandler, convHandler, userHandler, presenceHandler, webhookHandler, friendHandler, jwtSecret)
+	groupHandler := ginchat.NewGroupHandler(chatBiz)
+	routes.SetupRoutes(r, authHandler, chatHandler, convHandler, groupHandler, userHandler, presenceHandler, webhookHandler, friendHandler, jwtSecret)
 
 	var token string
 	var userID string

@@ -12,6 +12,7 @@ func SetupRoutes(
 	authHandler *ginchat.AuthHandler,
 	chatHandler *ginchat.ChatHandler,
 	convHandler *ginchat.ConversationHandler,
+	groupHandler *ginchat.GroupHandler,
 	userHandler *ginchat.UserHandler,
 	presenceHandler *ginchat.PresenceHandler,
 	webhookHandler *ginchat.WebhookHandler,
@@ -38,6 +39,14 @@ func SetupRoutes(
 			conversations.GET("", convHandler.ListConversations)
 			conversations.POST("", convHandler.CreateGroup)
 			conversations.GET("/:id/messages", convHandler.GetMessages)
+		}
+
+		groups := api.Group("/groups")
+		groups.Use(middleware.RequireAuth(jwtSecret))
+		{
+			groups.POST("", groupHandler.CreateGroup)
+			groups.POST("/:id/members", groupHandler.AddMember)
+			groups.GET("/:id/members", groupHandler.ListMembers)
 		}
 
 		users := api.Group("/users")

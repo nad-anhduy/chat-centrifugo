@@ -102,6 +102,14 @@ func (s *postgresStore) CreateConversation(ctx context.Context, conv *model.Conv
 	return s.db.WithContext(ctx).Create(conv).Error
 }
 
+func (s *postgresStore) GetConversationByID(ctx context.Context, conversationID string) (*model.Conversation, error) {
+	var conv model.Conversation
+	if err := s.db.WithContext(ctx).Where("id = ?", conversationID).First(&conv).Error; err != nil {
+		return nil, fmt.Errorf("get conversation by id %q: %w", conversationID, err)
+	}
+	return &conv, nil
+}
+
 // GetConversationsByUserID returns all conversations that a user is a participant of,
 // ordered by most recently updated first.
 func (s *postgresStore) GetConversationsByUserID(ctx context.Context, userID string) ([]model.Conversation, error) {
@@ -153,13 +161,27 @@ func (s *postgresStore) GetDetailedConversations(ctx context.Context, userID str
 			}
 		}
 
+		encryptedGroupKey := ""
+		if conv.Type == model.ConversationTypeGroup {
+			// Return per-user encrypted group key (group_members.group_id == conversation.id).
+			// Logic: SELECT encrypted_group_key FROM group_members WHERE group_id = ? AND user_id = ?.
+			// If missing, we still return conversation but client can show "request rekey".
+			_ = s.db.WithContext(ctx).
+				Table("group_members").
+				Select("encrypted_group_key").
+				Where("group_id = ? AND user_id = ?", conv.ID, userID).
+				Limit(1).
+				Scan(&encryptedGroupKey).Error
+		}
+
 		details = append(details, dto.ConversationDetail{
-			ID:           conv.ID,
-			Name:         displayName,
-			Type:         conv.Type,
-			Participants: participants,
-			CreatedAt:    conv.CreatedAt,
-			UpdatedAt:    conv.UpdatedAt,
+			ID:                conv.ID,
+			Name:              displayName,
+			Type:              conv.Type,
+			EncryptedGroupKey: encryptedGroupKey,
+			Participants:      participants,
+			CreatedAt:         conv.CreatedAt,
+			UpdatedAt:         conv.UpdatedAt,
 		})
 	}
 
@@ -249,6 +271,165 @@ func (s *postgresStore) GetDirectConversationBetween(ctx context.Context, user1I
 		return nil, nil // Not found, but no error
 	}
 	return &convs[0], nil
+}
+
+// --- Group operations ---
+
+func (s *postgresStore) CreateGroup(ctx context.Context, g *model.Group) error {
+	return s.db.WithContext(ctx).Create(g).Error
+}
+
+func (s *postgresStore) AddGroupMembers(ctx context.Context, members []model.GroupMember) error {
+	if len(members) == 0 {
+		return nil
+	}
+	return s.db.WithContext(ctx).Create(&members).Error
+}
+
+func (s *postgresStore) AddGroupMember(ctx context.Context, m *model.GroupMember) error {
+	return s.db.WithContext(ctx).Create(m).Error
+}
+
+func (s *postgresStore) GetGroupByID(ctx context.Context, groupID string) (*model.Group, error) {
+	var g model.Group
+	if err := s.db.WithContext(ctx).Where("id = ?", groupID).First(&g).Error; err != nil {
+		return nil, fmt.Errorf("get group by id %q: %w", groupID, err)
+	}
+	return &g, nil
+}
+
+func (s *postgresStore) GetGroupMember(ctx context.Context, groupID, userID string) (*model.GroupMember, error) {
+	var m model.GroupMember
+	tx := s.db.WithContext(ctx).Where("group_id = ? AND user_id = ?", groupID, userID).Limit(1).Find(&m)
+	if tx.Error != nil {
+		return nil, fmt.Errorf("get group member (g=%q,u=%q): %w", groupID, userID, tx.Error)
+	}
+	if tx.RowsAffected == 0 {
+		return nil, nil
+	}
+	return &m, nil
+}
+
+func (s *postgresStore) GetGroupMemberEncryptedKey(ctx context.Context, groupID, userID string) (string, error) {
+	var key string
+	tx := s.db.WithContext(ctx).Model(&model.GroupMember{}).
+		Select("encrypted_group_key").
+		Where("group_id = ? AND user_id = ?", groupID, userID).
+		Limit(1).
+		Scan(&key)
+	if tx.Error != nil {
+		return "", fmt.Errorf("get encrypted_group_key (g=%q,u=%q): %w", groupID, userID, tx.Error)
+	}
+	if key == "" {
+		return "", fmt.Errorf("encrypted_group_key not found (g=%q,u=%q)", groupID, userID)
+	}
+	return key, nil
+}
+
+func (s *postgresStore) ListGroupsByUserID(ctx context.Context, userID string) ([]model.Group, error) {
+	var groups []model.Group
+	err := s.db.WithContext(ctx).
+		Table("groups").
+		Joins("JOIN group_members gm ON gm.group_id = groups.id").
+		Where("gm.user_id = ?", userID).
+		Order("groups.updated_at DESC").
+		Scan(&groups).Error
+	if err != nil {
+		return nil, fmt.Errorf("list groups by user %q: %w", userID, err)
+	}
+	return groups, nil
+}
+
+func (s *postgresStore) ListGroupMembers(ctx context.Context, groupID string) ([]dto.GroupMemberInfo, error) {
+	var out []dto.GroupMemberInfo
+	type row struct {
+		UserID    string `gorm:"column:user_id"`
+		Username  string `gorm:"column:username"`
+		AvatarURL string `gorm:"column:avatar_url"`
+		Role      string `gorm:"column:role"`
+	}
+	var rows []row
+	err := s.db.WithContext(ctx).
+		Table("group_members gm").
+		Select("gm.user_id, u.username, u.avatar_url, gm.role").
+		Joins("JOIN users u ON u.id = gm.user_id").
+		Where("gm.group_id = ?", groupID).
+		Order("CASE WHEN gm.role IN ('creator','admin') THEN 0 ELSE 1 END, u.username ASC").
+		Scan(&rows).Error
+	if err != nil {
+		return nil, fmt.Errorf("list group members for group %q: %w", groupID, err)
+	}
+
+	out = make([]dto.GroupMemberInfo, 0, len(rows))
+	for _, r := range rows {
+		role := "member"
+		if r.Role == string(model.GroupRoleCreator) || r.Role == string(model.GroupRoleAdmin) {
+			role = "owner"
+		}
+		out = append(out, dto.GroupMemberInfo{
+			UserID:   r.UserID,
+			Username: r.Username,
+			Avatar:   r.AvatarURL,
+			Role:     role,
+		})
+	}
+	return out, nil
+}
+
+func (s *postgresStore) CreateGroupConversationAtomic(ctx context.Context, g *model.Group, members []model.GroupMember, conv *model.Conversation, participants []model.Participant) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(g).Error; err != nil {
+			return fmt.Errorf("create group: %w", err)
+		}
+
+		// Ensure conversation uses the same ID as group.
+		conv.ID = g.ID
+		if err := tx.Create(conv).Error; err != nil {
+			return fmt.Errorf("create conversation for group %q: %w", g.ID, err)
+		}
+
+		now := time.Now()
+		for i := range members {
+			members[i].GroupID = g.ID
+			if members[i].JoinedAt.IsZero() {
+				members[i].JoinedAt = now
+			}
+			if members[i].Role == "" {
+				members[i].Role = model.GroupRoleMember
+			}
+		}
+		if len(members) > 0 {
+			if err := tx.Create(&members).Error; err != nil {
+				return fmt.Errorf("insert group_members for group %q: %w", g.ID, err)
+			}
+		}
+
+		for i := range participants {
+			participants[i].ConversationID = g.ID
+			if participants[i].JoinedAt.IsZero() {
+				participants[i].JoinedAt = now
+			}
+		}
+		if len(participants) > 0 {
+			if err := tx.Create(&participants).Error; err != nil {
+				return fmt.Errorf("insert participants for group %q: %w", g.ID, err)
+			}
+		}
+
+		return nil
+	})
+}
+
+func (s *postgresStore) AddGroupMemberAtomic(ctx context.Context, m *model.GroupMember, p *model.Participant) error {
+	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(m).Error; err != nil {
+			return fmt.Errorf("insert group_member (g=%q,u=%q): %w", m.GroupID, m.UserID, err)
+		}
+		if err := tx.Create(p).Error; err != nil {
+			return fmt.Errorf("insert participant for group (g=%q,u=%q): %w", p.ConversationID, p.UserID, err)
+		}
+		return nil
+	})
 }
 
 // --- Search Users ---

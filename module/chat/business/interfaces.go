@@ -25,6 +25,7 @@ type UserStorage interface {
 // ConversationStorage defines the contract for conversation and participant data access.
 type ConversationStorage interface {
 	CreateConversation(ctx context.Context, conv *model.Conversation) error
+	GetConversationByID(ctx context.Context, conversationID string) (*model.Conversation, error)
 	AddParticipant(ctx context.Context, p *model.Participant) error
 	AddParticipants(ctx context.Context, participants []model.Participant) error
 	GetConversationsByUserID(ctx context.Context, userID string) ([]model.Conversation, error)
@@ -32,6 +33,31 @@ type ConversationStorage interface {
 	GetParticipantIDs(ctx context.Context, conversationID string) ([]string, error)
 	GetConversationIDsByUserID(ctx context.Context, userID string) ([]string, error)
 	GetDirectConversationBetween(ctx context.Context, user1ID, user2ID string) (*model.Conversation, error)
+}
+
+type GroupStorage interface {
+	CreateGroup(ctx context.Context, g *model.Group) error
+	AddGroupMembers(ctx context.Context, members []model.GroupMember) error
+	AddGroupMember(ctx context.Context, m *model.GroupMember) error
+	GetGroupByID(ctx context.Context, groupID string) (*model.Group, error)
+	GetGroupMember(ctx context.Context, groupID, userID string) (*model.GroupMember, error)
+	GetGroupMemberEncryptedKey(ctx context.Context, groupID, userID string) (string, error)
+	ListGroupsByUserID(ctx context.Context, userID string) ([]model.Group, error)
+	ListGroupMembers(ctx context.Context, groupID string) ([]dto.GroupMemberInfo, error)
+
+	// CreateGroupConversationAtomic creates:
+	// - groups row
+	// - group_members rows
+	// - conversations row (id == group.id, type=GROUP)
+	// - participants rows (conversation_id == group.id)
+	// in a single transaction.
+	CreateGroupConversationAtomic(ctx context.Context, g *model.Group, members []model.GroupMember, conv *model.Conversation, participants []model.Participant) error
+
+	// AddGroupMemberAtomic adds:
+	// - group_members row
+	// - participants row
+	// in a single transaction.
+	AddGroupMemberAtomic(ctx context.Context, m *model.GroupMember, p *model.Participant) error
 }
 
 // MessageStorage defines the contract for message persistence (ScyllaDB).

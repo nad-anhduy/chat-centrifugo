@@ -8,6 +8,7 @@ import "time"
 type CentrifugoMessagePayload struct {
 	MessageID        string    `json:"message_id"`
 	ConversationID   string    `json:"conversation_id"`
+	GroupID          string    `json:"group_id,omitempty"`
 	SenderID         string    `json:"sender_id"`
 	SenderName       string    `json:"sender_name"`
 	ContentEncrypted string    `json:"content_encrypted"`

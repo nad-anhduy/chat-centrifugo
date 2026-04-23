@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,21 +28,43 @@ func main() {
 		log.Fatalf("Failed to connect to Postgres: %v", err)
 	}
 
-	if err := runSQLMigration(db, "migrations/0001_initial_postgres.up.sql"); err != nil {
-		log.Fatalf("Failed to run Postgres migrations: %v", err)
+	sqlFiles, err := listMigrationFiles("migrations", "*.up.sql")
+	if err != nil {
+		log.Fatalf("Failed to list Postgres migrations: %v", err)
+	}
+	if len(sqlFiles) == 0 {
+		log.Fatalf("No Postgres migration files found in migrations/")
+	}
+	for _, f := range sqlFiles {
+		fmt.Printf(">>> [Postgres] Applying %s...\n", f)
+		if err := runSQLMigration(db, f); err != nil {
+			log.Fatalf("Failed to run Postgres migrations: %v", err)
+		}
 	}
 	fmt.Println(">>> Postgres initialization complete.")
 
 	// 2. Initialize ScyllaDB
 	fmt.Println(">>> Starting ScyllaDB initialization...")
+	cqlFiles, err := listMigrationFiles("migrations", "*.up.cql")
+	if err != nil {
+		log.Fatalf("Failed to list Scylla migrations: %v", err)
+	}
+	if len(cqlFiles) == 0 {
+		log.Fatalf("No Scylla migration files found in migrations/")
+	}
+
 	// First connect without keyspace to ensure we can create it
 	session, err := connectScylla(cfg.ScyllaHosts, "")
 	if err != nil {
 		log.Fatalf("Failed to connect to ScyllaDB: %v", err)
 	}
 
-	if err := runCQLMigration(session, "migrations/0001_initial_scylla.up.cql", true); err != nil {
-		log.Fatalf("Failed to run ScyllaDB migrations (keyspace phase): %v", err)
+	// Pass 1: create keyspace statements across all files.
+	for _, f := range cqlFiles {
+		fmt.Printf(">>> [Scylla] (keyspace) Applying %s...\n", f)
+		if err := runCQLMigration(session, f, true); err != nil {
+			log.Fatalf("Failed to run ScyllaDB migrations (keyspace phase): %v", err)
+		}
 	}
 	session.Close()
 
@@ -51,10 +75,23 @@ func main() {
 	}
 	defer session.Close()
 
-	if err := runCQLMigration(session, "migrations/0001_initial_scylla.up.cql", false); err != nil {
-		log.Fatalf("Failed to run ScyllaDB migrations (table phase): %v", err)
+	// Pass 2: run table/alter statements (skip CREATE KEYSPACE + USE).
+	for _, f := range cqlFiles {
+		fmt.Printf(">>> [Scylla] (tables) Applying %s...\n", f)
+		if err := runCQLMigration(session, f, false); err != nil {
+			log.Fatalf("Failed to run ScyllaDB migrations (table phase): %v", err)
+		}
 	}
 	fmt.Println(">>> ScyllaDB initialization complete.")
+}
+
+func listMigrationFiles(dir string, pattern string) ([]string, error) {
+	matches, err := filepath.Glob(filepath.Join(dir, pattern))
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(matches)
+	return matches, nil
 }
 
 func connectPostgres(dsn string) (*gorm.DB, error) {

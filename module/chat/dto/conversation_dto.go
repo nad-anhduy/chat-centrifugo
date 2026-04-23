@@ -14,10 +14,11 @@ type ParticipantDetail struct {
 
 // ConversationDetail provides a comprehensive view of a conversation including its participants.
 type ConversationDetail struct {
-	ID           string                 `json:"id"`
-	Name         string                 `json:"name"`
-	Type         model.ConversationType `json:"type"`
-	Participants []ParticipantDetail    `json:"participants"`
-	CreatedAt    time.Time              `json:"created_at"`
-	UpdatedAt    time.Time              `json:"updated_at"`
+	ID                string                 `json:"id"`
+	Name              string                 `json:"name"`
+	Type              model.ConversationType `json:"type"`
+	EncryptedGroupKey string                 `json:"encrypted_group_key,omitempty"`
+	Participants      []ParticipantDetail    `json:"participants"`
+	CreatedAt         time.Time              `json:"created_at"`
+	UpdatedAt         time.Time              `json:"updated_at"`
 }

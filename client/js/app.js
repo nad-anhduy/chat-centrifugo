@@ -40,6 +40,11 @@ const api = {
             return apiRequest(url, { method: 'GET' });
         }
     },
+    groups: {
+        create: (payload) => apiRequest('/groups', { method: 'POST', body: JSON.stringify(payload) }),
+        addMember: (groupId, payload) => apiRequest(`/groups/${groupId}/members`, { method: 'POST', body: JSON.stringify(payload) }),
+        listMembers: (groupId) => apiRequest(`/groups/${groupId}/members`, { method: 'GET' }),
+    },
     chat: {
         sendMessage: (conversation_id, content_encrypted, key_for_sender = '', key_for_receiver = '', iv = '') =>
             apiRequest('/chat/messages', {
@@ -120,6 +125,122 @@ async function decryptHybridMessage(contentB64, wrapB64, ivB64, privateKeyPem) {
 }
 
 const publicKeyCache = {};
+const GROUP_KEY_CACHE_KEY = 'group_keys_cache_v1';
+const groupKeyMemCache = {}; // groupId -> aesRawB64 (fast path)
+function loadGroupKeysCache() {
+    try { return JSON.parse(localStorage.getItem(GROUP_KEY_CACHE_KEY) || '{}') || {}; }
+    catch (_) { return {}; }
+}
+function saveGroupKeysCache(cache) {
+    localStorage.setItem(GROUP_KEY_CACHE_KEY, JSON.stringify(cache || {}));
+}
+function cacheGroupKey(groupId, aesRawB64) {
+    groupKeyMemCache[String(groupId)] = aesRawB64;
+    const cache = loadGroupKeysCache();
+    cache[groupId] = { k: aesRawB64, updated_at: Date.now() };
+    saveGroupKeysCache(cache);
+}
+function getCachedGroupKeyB64(groupId) {
+    const mem = groupKeyMemCache[String(groupId)];
+    if (mem) return mem;
+    const cache = loadGroupKeysCache();
+    const k = cache[groupId]?.k || null;
+    if (k) groupKeyMemCache[String(groupId)] = k;
+    return k;
+}
+
+async function decryptGroupKeyToRawB64(encryptedGroupKeyB64, privateKeyPem) {
+    if (!encryptedGroupKeyB64) throw new Error('missing encrypted_group_key');
+    if (!privateKeyPem) throw new Error('missing RSA private key');
+    const priv = await importPkcs8PrivateRSA(privateKeyPem);
+    const wrap = b64decode(encryptedGroupKeyB64);
+    const aesRawBuf = await crypto.subtle.decrypt({ name: 'RSA-OAEP' }, priv, wrap);
+    const raw = new Uint8Array(aesRawBuf);
+    if (raw.length !== 32) throw new Error(`unexpected group key length: ${raw.length}`);
+    return b64encode(raw.buffer);
+}
+
+function ensureMissingGroupKeyBanner(groupId) {
+    const existing = document.getElementById('missing-group-key-banner');
+    if (existing) return;
+    const wrap = document.createElement('div');
+    wrap.id = 'missing-group-key-banner';
+    wrap.style.cssText = `
+        padding: 10px 12px;
+        margin: 10px 0;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: rgba(127, 29, 29, 0.25);
+        color: var(--text);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+    `;
+    wrap.innerHTML = `
+        <div style="min-width:0;">
+            <div style="font-weight:700;">Missing Group Key</div>
+            <div style="font-size:0.85rem; color: var(--text-muted);">
+                Không có khóa AES cho nhóm này. Bạn có thể yêu cầu cấp lại khóa từ admin/creator.
+            </div>
+        </div>
+        <button id="btn-request-rekey" type="button"
+            style="white-space:nowrap; background: var(--primary); border: none; color: white; padding: 6px 10px; border-radius: 8px; cursor: pointer;">
+            Yêu cầu cấp lại khóa
+        </button>
+    `;
+    const btn = wrap.querySelector('#btn-request-rekey');
+    if (btn) {
+        btn.addEventListener('click', () => {
+            // Backend endpoint not implemented in this repo yet: we provide clear UX instead of silent failure.
+            alert('Hãy liên hệ creator/admin để re-invite bạn hoặc rotate group key để server cấp lại encrypted_group_key.');
+        });
+    }
+    const container = document.getElementById('messages-container');
+    if (container) container.insertBefore(wrap, container.firstChild);
+}
+
+function clearMissingGroupKeyBanner() {
+    const existing = document.getElementById('missing-group-key-banner');
+    if (existing) existing.remove();
+}
+
+async function loadGroupKeyForConversation(conv) {
+    if (!conv || String(conv.type || '').toUpperCase() !== 'GROUP') return null;
+    const groupId = String(conv.id);
+
+    const cached = getCachedGroupKeyB64(groupId);
+    if (cached) { clearMissingGroupKeyBanner(); return cached; }
+
+    try {
+        const enc = conv.encrypted_group_key || conv.encryptedGroupKey || '';
+        if (!enc) throw new Error('encrypted_group_key missing from API');
+        const rawB64 = await decryptGroupKeyToRawB64(enc, currentUser?.keys?.privateKeyPem);
+        cacheGroupKey(groupId, rawB64);
+        clearMissingGroupKeyBanner();
+        return rawB64;
+    } catch (err) {
+        console.error('[E2EE] loadGroupKey failed', { groupId, err });
+        ensureMissingGroupKeyBanner(groupId);
+        return null;
+    }
+}
+async function encryptGroupMessage(plaintext, groupAesRawB64) {
+    const aesRaw = b64decode(groupAesRawB64);
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const aesKey = await crypto.subtle.importKey('raw', aesRaw, { name: 'AES-GCM', length: 256 }, false, ['encrypt']);
+    const pt = new TextEncoder().encode(plaintext);
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, pt);
+    return { content_encrypted: b64encode(ct), iv: b64encode(iv) };
+}
+async function decryptGroupMessage(contentB64, ivB64, groupAesRawB64) {
+    const aesRaw = b64decode(groupAesRawB64);
+    const iv = b64decode(ivB64);
+    const ct = b64decode(contentB64);
+    const aesKey = await crypto.subtle.importKey('raw', aesRaw, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, aesKey, ct);
+    return new TextDecoder().decode(pt);
+}
 const e2e = {
     storeKeys: (userId, publicPem, privatePem) => {
         localStorage.setItem(`e2ee_public_key_${userId}`, publicPem);
@@ -208,8 +329,9 @@ const ws = {
             .on('disconnected', (ctx) => { console.log(`Centrifugo disconnected: ${ctx.reason}`); if (wsCallbacks.onDisconnect) wsCallbacks.onDisconnect(); })
             .connect();
     },
-    subscribe: (conversationId) => {
-        const channel = `chat:${conversationId}`;
+    subscribe: (conversationId, conversationType = 'DIRECT') => {
+        const prefix = String(conversationType).toUpperCase() === 'GROUP' ? 'groups' : 'chat';
+        const channel = `${prefix}:${conversationId}`;
         if (currentSubscriptions[channel]) return currentSubscriptions[channel];
         const sub = centrifuge.newSubscription(channel);
 
@@ -340,6 +462,10 @@ window.addEventListener('DOMContentLoaded', () => {
         chatName: document.getElementById('current-chat-name'),
         chatStatus: document.getElementById('current-chat-status'),
         chatAvatar: document.getElementById('current-chat-avatar'),
+        groupInfoPanel: document.getElementById('group-info-panel'),
+        btnCloseInfo: document.getElementById('btn-close-info'),
+        groupMembersList: document.getElementById('group-members-list'),
+        groupMembersLoading: document.getElementById('group-members-loading'),
 
         messagesContainer: document.getElementById('messages-container'),
         chatMessagesScroll: document.getElementById('chat-messages'),
@@ -351,6 +477,12 @@ window.addEventListener('DOMContentLoaded', () => {
         dialogNewChat: document.getElementById('dialog-new-chat'),
         newGroupName: document.getElementById('new-group-name'),
         newGroupMembers: document.getElementById('new-group-members'),
+        btnCloseGroup: document.getElementById('btn-close-group'),
+        groupMemberChips: document.getElementById('group-member-chips'),
+        groupMemberSearch: document.getElementById('group-member-search'),
+        groupMemberResults: document.getElementById('group-member-results'),
+        groupMemberCount: document.getElementById('group-member-count'),
+        groupCreateError: document.getElementById('group-create-error'),
         btnCancelGroup: document.getElementById('btn-cancel-group'),
         btnCreateGroup: document.getElementById('btn-create-group'),
 
@@ -371,6 +503,11 @@ window.addEventListener('DOMContentLoaded', () => {
         btnLogout: document.getElementById('btn-logout'),
     };
 
+    // --- GROUP INFO PANEL STATE ---
+    let isInfoPanelOpen = false;
+    let membersCache = {}; // groupId -> array
+    let membersLoading = false;
+
     // --- EVENT BINDINGS ---
     els.btnRegister.addEventListener('click', handleRegister);
     els.btnLogin.addEventListener('click', handleLogin);
@@ -383,10 +520,106 @@ window.addEventListener('DOMContentLoaded', () => {
             handleSend(); 
         }
     });
-    els.btnNewChat.addEventListener('click', () => els.dialogNewChat.classList.add('active'));
-    els.btnCancelGroup.addEventListener('click', () => els.dialogNewChat.classList.remove('active'));
+    function closeCreateGroupDialog() {
+        els.dialogNewChat.classList.remove('active');
+        // Allow fade-out animation then hide (inline style is present in HTML).
+        setTimeout(() => { if (els.dialogNewChat) els.dialogNewChat.style.display = 'none'; }, 220);
+    }
+
+    els.btnNewChat.addEventListener('click', () => {
+        openCreateGroupDialog();
+    });
+    els.btnCancelGroup.addEventListener('click', closeCreateGroupDialog);
+    if (els.btnCloseGroup) els.btnCloseGroup.addEventListener('click', closeCreateGroupDialog);
     els.btnCreateGroup.addEventListener('click', handleCreateGroup);
     els.chatMessagesScroll.addEventListener('scroll', handleScrollHistory);
+
+    function setInfoPanelOpen(next) {
+        isInfoPanelOpen = !!next;
+        if (!els.groupInfoPanel) return;
+        if (isInfoPanelOpen) els.groupInfoPanel.classList.remove('hidden');
+        else els.groupInfoPanel.classList.add('hidden');
+    }
+
+    function renderMembers(list) {
+        if (!els.groupMembersList) return;
+        const arr = Array.isArray(list) ? list : [];
+        if (arr.length === 0) {
+            els.groupMembersList.innerHTML = `<div style="color: var(--text-muted); font-size: 0.85rem; padding: 6px 2px;">No members</div>`;
+            return;
+        }
+        els.groupMembersList.innerHTML = arr.map(m => {
+            const name = escapeHtml(m.username || m.user_id || 'Unknown');
+            const avatar = (m.avatar || '').trim();
+            const initial = (m.username || m.user_id || '?').trim().charAt(0).toUpperCase();
+            const isOwner = String(m.role || '').toLowerCase() === 'owner';
+            const avatarHtml = avatar
+                ? `<div class="group-member-avatar"><img src="${escapeHtml(avatar)}" alt="${name}"></div>`
+                : `<div class="group-member-avatar">${escapeHtml(initial)}</div>`;
+            const ownerHtml = isOwner ? `<div class="group-member-owner">👑 Owner</div>` : ``;
+            return `
+                <div class="group-member-item" title="${escapeHtml(m.user_id || '')}">
+                    <div class="group-member-left">
+                        ${avatarHtml}
+                        <div class="group-member-name">${name}</div>
+                    </div>
+                    ${ownerHtml}
+                </div>
+            `;
+        }).join('');
+    }
+
+    async function loadGroupMembers(groupID) {
+        if (!groupID) return;
+        if (!els.groupMembersLoading) return;
+        if (membersLoading) return;
+        membersLoading = true;
+        els.groupMembersLoading.classList.remove('hidden');
+        try {
+            const resp = await api.groups.listMembers(groupID);
+            const members = resp.data || [];
+            membersCache[String(groupID)] = members;
+            renderMembers(members);
+        } catch (err) {
+            console.error('Failed to load group members', err);
+            if (els.groupMembersList) {
+                els.groupMembersList.innerHTML = `<div style="color: #fecaca; font-size: 0.85rem; padding: 6px 2px;">Failed to load members: ${escapeHtml(err.message || String(err))}</div>`;
+            }
+        } finally {
+            els.groupMembersLoading.classList.add('hidden');
+            membersLoading = false;
+        }
+    }
+
+    function toggleInfoPanel() {
+        if (!currentConversationId) return;
+        const conv = conversationsObj[currentConversationId];
+        const isGroup = String(conv?.type || '').toUpperCase() === 'GROUP' || !!conv?.is_group;
+        if (!isGroup) return;
+
+        const next = !isInfoPanelOpen;
+        setInfoPanelOpen(next);
+        if (!next) return;
+
+        const gid = String(currentConversationId);
+        if (membersCache[gid]) {
+            renderMembers(membersCache[gid]);
+            return;
+        }
+        renderMembers([]);
+        loadGroupMembers(gid);
+    }
+
+    if (els.chatName) {
+        els.chatName.style.cursor = 'pointer';
+        els.chatName.title = 'Click to view group info';
+        els.chatName.addEventListener('click', () => {
+            const conv = conversationsObj[currentConversationId];
+            const isGroup = String(conv?.type || '').toUpperCase() === 'GROUP' || !!conv?.is_group;
+            if (isGroup) toggleInfoPanel();
+        });
+    }
+    if (els.btnCloseInfo) els.btnCloseInfo.addEventListener('click', () => setInfoPanelOpen(false));
 
     // Search input with 300ms debounce
     let searchDebounce = null;
@@ -408,8 +641,178 @@ window.addEventListener('DOMContentLoaded', () => {
     els.btnClosePending.addEventListener('click', () => { els.dialogPending.classList.remove('active'); });
 
     // Close dialogs on overlay click
-    els.dialogNewChat.addEventListener('click', (e) => { if (e.target === els.dialogNewChat) els.dialogNewChat.classList.remove('active'); });
+    els.dialogNewChat.addEventListener('click', (e) => { if (e.target === els.dialogNewChat) closeCreateGroupDialog(); });
     els.dialogPending.addEventListener('click', (e) => { if (e.target === els.dialogPending) els.dialogPending.classList.remove('active'); });
+
+    // --- Create Group member picker state ---
+    let groupSelected = {}; // user_id -> { id, username, public_key }
+    let groupSearchDebounce = null;
+
+    function resetCreateGroupDialog() {
+        groupSelected = {};
+        if (els.newGroupName) els.newGroupName.value = '';
+        if (els.newGroupMembers) els.newGroupMembers.value = '';
+        if (els.groupMemberSearch) els.groupMemberSearch.value = '';
+        hideGroupCreateError();
+        renderGroupChips();
+        renderGroupMemberCount();
+        closeGroupSearchDropdown();
+        syncCreateGroupButtonState();
+    }
+
+    function openCreateGroupDialog() {
+        resetCreateGroupDialog();
+        if (els.dialogNewChat) els.dialogNewChat.style.display = 'flex';
+        els.dialogNewChat.classList.add('active');
+        setTimeout(() => { try { els.newGroupName?.focus(); } catch (_) {} }, 0);
+    }
+
+    function showGroupCreateError(msg) {
+        if (!els.groupCreateError) return;
+        if (!msg) { hideGroupCreateError(); return; }
+        els.groupCreateError.textContent = msg;
+        els.groupCreateError.style.display = 'block';
+    }
+    function hideGroupCreateError() {
+        if (!els.groupCreateError) return;
+        els.groupCreateError.textContent = '';
+        els.groupCreateError.style.display = 'none';
+    }
+
+    function closeGroupSearchDropdown() {
+        if (!els.groupMemberResults) return;
+        els.groupMemberResults.style.display = 'none';
+        els.groupMemberResults.innerHTML = '';
+    }
+
+    function renderGroupMemberCount() {
+        if (!els.groupMemberCount) return;
+        const count = Object.keys(groupSelected).length;
+        els.groupMemberCount.textContent = `${count} selected`;
+    }
+
+    function syncCreateGroupButtonState() {
+        const nameOk = !!(els.newGroupName?.value || '').trim();
+        const memberCount = Object.keys(groupSelected).length;
+        const allHaveKeys = Object.values(groupSelected).every(m => !!m.public_key);
+        const canCreate = nameOk && memberCount >= 1 && allHaveKeys;
+        if (els.btnCreateGroup) els.btnCreateGroup.disabled = !canCreate;
+    }
+
+    function renderGroupChips() {
+        if (!els.groupMemberChips) return;
+        const members = Object.values(groupSelected);
+        if (members.length === 0) {
+            els.groupMemberChips.innerHTML = `<div class="chips-empty">Search and add members below.</div>`;
+            return;
+        }
+        els.groupMemberChips.innerHTML = members.map(m => {
+            const keyPill = m.public_key ? `<span class="pill ok">🔑 key</span>` : `<span class="pill warn">⚠ no key</span>`;
+            return `
+                <div class="chip" title="${escapeHtml(m.id)}">
+                    <div style="min-width:0;">
+                        <div class="chip-name">${escapeHtml(m.username || m.id)}</div>
+                        <div class="chip-meta">${keyPill}</div>
+                    </div>
+                    <button class="chip-remove" type="button" data-remove-user-id="${escapeHtml(m.id)}" aria-label="Remove">✕</button>
+                </div>
+            `;
+        }).join('');
+
+        // bind removes
+        els.groupMemberChips.querySelectorAll('button[data-remove-user-id]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const uid = btn.getAttribute('data-remove-user-id');
+                if (!uid) return;
+                delete groupSelected[uid];
+                hideGroupCreateError();
+                renderGroupChips();
+                renderGroupMemberCount();
+                syncCreateGroupButtonState();
+            });
+        });
+    }
+
+    async function handleGroupMemberSearch(q) {
+        if (!els.groupMemberResults) return;
+        try {
+            const resp = await api.users.search(q);
+            const users = resp.data || [];
+
+            const filtered = users
+                .filter(u => u && u.id && !sameUserId(u.id, currentUser.id))
+                .filter(u => !groupSelected[String(u.id)]);
+
+            els.groupMemberResults.innerHTML = '';
+            if (filtered.length === 0) {
+                els.groupMemberResults.innerHTML = `<div class="dropdown-item" style="cursor:default;"><div class="dropdown-left"><div class="dropdown-title">No results</div><div class="dropdown-sub">Try a different username.</div></div></div>`;
+            } else {
+                filtered.slice(0, 20).forEach(u => {
+                    const hasKey = !!u.public_key;
+                    const pill = hasKey ? `<span class="pill ok">🔑 key</span>` : `<span class="pill warn">⚠ no key</span>`;
+                    const item = document.createElement('div');
+                    item.className = 'dropdown-item';
+                    item.innerHTML = `
+                        <div class="dropdown-left">
+                            <div class="dropdown-title">${escapeHtml(u.username || u.id)}</div>
+                            <div class="dropdown-sub">${escapeHtml(String(u.id))}</div>
+                        </div>
+                        ${pill}
+                    `;
+                    item.addEventListener('click', () => {
+                        groupSelected[String(u.id)] = { id: String(u.id), username: u.username || String(u.id), public_key: u.public_key || null };
+                        // Pre-cache public key for other flows
+                        if (u.public_key) publicKeyCache[String(u.id)] = u.public_key;
+                        if (!u.public_key) {
+                            showGroupCreateError('One or more selected users have no E2EE public key yet. They must login at least once to register a key before you can create an encrypted group.');
+                        } else {
+                            hideGroupCreateError();
+                        }
+                        renderGroupChips();
+                        renderGroupMemberCount();
+                        syncCreateGroupButtonState();
+                        closeGroupSearchDropdown();
+                        if (els.groupMemberSearch) els.groupMemberSearch.value = '';
+                        try { els.groupMemberSearch?.focus(); } catch (_) {}
+                    });
+                    els.groupMemberResults.appendChild(item);
+                });
+            }
+            els.groupMemberResults.style.display = 'block';
+        } catch (err) {
+            console.error('Group member search failed:', err);
+            els.groupMemberResults.innerHTML = `<div class="dropdown-item" style="cursor:default;"><div class="dropdown-left"><div class="dropdown-title">Search failed</div><div class="dropdown-sub">${escapeHtml(err.message || String(err))}</div></div></div>`;
+            els.groupMemberResults.style.display = 'block';
+        }
+    }
+
+    if (els.groupMemberSearch) {
+        els.groupMemberSearch.addEventListener('input', () => {
+            clearTimeout(groupSearchDebounce);
+            const q = els.groupMemberSearch.value.trim();
+            if (!q) { closeGroupSearchDropdown(); return; }
+            groupSearchDebounce = setTimeout(() => handleGroupMemberSearch(q), 250);
+        });
+        els.groupMemberSearch.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') closeGroupSearchDropdown();
+        });
+    }
+
+    if (els.newGroupName) {
+        els.newGroupName.addEventListener('input', () => {
+            hideGroupCreateError();
+            syncCreateGroupButtonState();
+        });
+    }
+
+    document.addEventListener('click', (e) => {
+        // Close group search results when clicking outside
+        if (els.groupMemberSearch && els.groupMemberResults) {
+            if (!els.groupMemberSearch.contains(e.target) && !els.groupMemberResults.contains(e.target)) {
+                closeGroupSearchDropdown();
+            }
+        }
+    });
 
     let pendingBadgeCount = 0;
     let friendRequests = [];
@@ -550,7 +953,13 @@ window.addEventListener('DOMContentLoaded', () => {
             // Use Promise.all to ensure all conversations are initialized before proceeding
             await Promise.all(convs.map(async (conv) => {
                 conversationsObj[conv.id] = conv;
-                ws.subscribe(conv.id);
+                ws.subscribe(conv.id, conv.type);
+
+                // Preload group AES key into cache (best effort).
+                // This avoids "missing group key" when opening messages immediately after login.
+                if (String(conv.type || '').toUpperCase() === 'GROUP') {
+                    await loadGroupKeyForConversation(conv);
+                }
 
                 if (conv.participants) {
                     conv.participants.forEach(p => { 
@@ -561,7 +970,8 @@ window.addEventListener('DOMContentLoaded', () => {
 
                 // Fetch immediate presence for this channel from the server
                 try {
-                    const presence = await ws.getPresence(`chat:${conv.id}`);
+                    const prefix = String(conv.type || '').toUpperCase() === 'GROUP' ? 'groups' : 'chat';
+                    const presence = await ws.getPresence(`${prefix}:${conv.id}`);
                     for (let clientID in presence) {
                         const info = presence[clientID];
                         updatePresenceUI(info.user, 'ONLINE', conv.id);
@@ -579,30 +989,42 @@ window.addEventListener('DOMContentLoaded', () => {
         } catch (err) { console.error("Failed to load dashboard", err); }
     }
 
+    function getConversationMemberCount(conv) {
+        const raw = conv?.member_count ?? conv?.memberCount ?? conv?.members_count ?? conv?.membersCount ?? 0;
+        const n = Number(raw);
+        // Fallback: at least 2 members for a group conversation.
+        return Number.isFinite(n) && n > 0 ? n : 2;
+    }
+
     function renderSidebarItem(conv) {
         const elId = `conv-${conv.id}`;
         let el = document.getElementById(elId);
+        const isGroup = String(conv?.type || '').toUpperCase() === 'GROUP' || !!conv?.is_group;
+        const avatarLetter = (conv.name || "?").charAt(0).toUpperCase();
+        const memberCount = isGroup ? getConversationMemberCount(conv) : 0;
+
         if (!el) {
             el = document.createElement('div');
             el.className = 'conv-item';
             el.id = elId;
             el.onclick = () => openConversation(conv.id);
-            let avatarLetter = (conv.name || "?").charAt(0).toUpperCase();
-            el.innerHTML = `
-                <div class="conv-item-avatar">
-                    <div class="avatar-placeholder" style="width: 44px; height: 44px;">${avatarLetter}</div>
-                    <div class="presence-dot" id="presence-${conv.id}"></div>
-                </div>
-                <div class="conv-item-details">
-                    <div class="conv-item-top">
-                        <span class="conv-item-name">${conv.name || "Conversation"}</span>
-                        <span class="conv-item-time" id="time-${conv.id}"></span>
-                    </div>
-                    <div class="conv-item-last-msg" id="last-msg-${conv.id}">No messages yet</div>
-                </div>
-            `;
             els.convList.appendChild(el);
         }
+
+        // Re-render template so UI can adapt if conversation type changes (e.g. realtime).
+        el.innerHTML = `
+            <div class="conv-item-avatar">
+                <div class="avatar-placeholder" style="width: 44px; height: 44px;">${avatarLetter}</div>
+                ${isGroup ? '' : `<div class="presence-dot" id="presence-${conv.id}"></div>`}
+            </div>
+            <div class="conv-item-details">
+                <div class="conv-item-top">
+                    <span class="conv-item-name">${conv.name || "Conversation"}</span>
+                    <span class="conv-item-time" id="time-${conv.id}"></span>
+                </div>
+                <div class="conv-item-last-msg" id="last-msg-${conv.id}">No messages yet</div>
+            </div>
+        `;
     }
 
     /**
@@ -627,7 +1049,9 @@ window.addEventListener('DOMContentLoaded', () => {
 
             // Also update the active chat header if this is the current conversation
             if (currentConversationId === cid) {
-                els.chatStatus.innerHTML = isOnline ? '🟢 Online' : '⚪ Offline';
+                const conv = conversationsObj?.[cid];
+                const isGroup = String(conv?.type || '').toUpperCase() === 'GROUP' || !!conv?.is_group;
+                if (!isGroup) els.chatStatus.innerHTML = isOnline ? '🟢 Online' : '⚪ Offline';
             }
         };
 
@@ -668,19 +1092,68 @@ window.addEventListener('DOMContentLoaded', () => {
     }
 
     async function handleCreateGroup() {
-        const name = els.newGroupName.value.trim();
-        const membersRaw = els.newGroupMembers.value.trim();
-        if (!name || !membersRaw) return;
-        let members = membersRaw.split(',').map(m => m.trim()).filter(x => x);
+        hideGroupCreateError();
+        const name = (els.newGroupName?.value || '').trim();
+        if (!name) { showGroupCreateError('Please enter a group name.'); return; }
+
+        const selectedIds = Object.keys(groupSelected);
+
+        // Advanced fallback: uuid list
+        let fallback = [];
+        const membersRaw = (els.newGroupMembers?.value || '').trim();
+        if (membersRaw) fallback = membersRaw.split(',').map(m => m.trim()).filter(x => x);
+
+        const memberIds = Array.from(new Set([...selectedIds, ...fallback].filter(x => x && !sameUserId(x, currentUser.id))));
+        if (memberIds.length < 1) { showGroupCreateError('Pick at least 1 member (besides you).'); return; }
+
         try {
             els.btnCreateGroup.disabled = true;
-            await api.conversations.createGroup(name, members);
-            els.dialogNewChat.classList.remove('active');
-            els.newGroupName.value = '';
-            els.newGroupMembers.value = '';
+            els.btnCreateGroup.textContent = 'Creating...';
+
+            // Generate symmetric group key (32 bytes).
+            const aesRaw = crypto.getRandomValues(new Uint8Array(32));
+            const aesRawB64 = b64encode(aesRaw.buffer);
+
+            const all = [currentUser.id, ...memberIds];
+            const members = [];
+
+            for (const uid of all) {
+                let pubPem = null;
+                if (sameUserId(uid, currentUser.id)) pubPem = currentUser?.keys?.publicKeyPem;
+                else {
+                    // Prefer cached from picker/search
+                    pubPem = groupSelected[String(uid)]?.public_key || publicKeyCache[String(uid)] || null;
+                    if (!pubPem) pubPem = await e2e.getPublicKey(uid);
+                }
+
+                if (!pubPem) throw new Error(`Missing public key for ${uid}. They must login at least once to register a key.`);
+
+                const pub = await importSpkiPublicRSA(pubPem);
+                const wrapped = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, pub, aesRaw);
+                members.push({
+                    user_id: String(uid),
+                    encrypted_group_key: b64encode(wrapped),
+                    role: sameUserId(uid, currentUser.id) ? 'creator' : 'member',
+                });
+            }
+
+            const resp = await api.groups.create({ name, avatar: '', members });
+            const group = resp.data;
+            if (!group?.id) throw new Error('Invalid group create response');
+
+            // Cache raw group key locally to avoid RSA decrypt per-message.
+            cacheGroupKey(group.id, aesRawB64);
+
+            closeCreateGroupDialog();
+            resetCreateGroupDialog();
             await loadDashboard();
-        } catch (err) { alert(err.message); }
-        finally { els.btnCreateGroup.disabled = false; }
+        } catch (err) {
+            showGroupCreateError(err.message);
+        } finally {
+            els.btnCreateGroup.disabled = false;
+            els.btnCreateGroup.textContent = 'Create';
+            syncCreateGroupButtonState();
+        }
     }
 
     async function openConversation(cid) {
@@ -695,9 +1168,20 @@ window.addEventListener('DOMContentLoaded', () => {
         const conv = conversationsObj[cid];
         els.chatAvatar.textContent = (conv.name || "?").charAt(0).toUpperCase();
         els.chatName.textContent = conv.name || "Conversation";
-        let dot = document.getElementById(`presence-${cid}`);
-        let isOnline = dot && dot.classList.contains('online');
-        els.chatStatus.innerHTML = isOnline ? '🟢 Online' : '⚪ Offline';
+        const isGroup = String(conv?.type || '').toUpperCase() === 'GROUP' || !!conv?.is_group;
+        if (isGroup) {
+            const memberCount = getConversationMemberCount(conv);
+            els.chatStatus.textContent = `${memberCount} members`;
+            els.chatStatus.classList.add('text-xs', 'text-gray-400');
+            // Close panel on conversation switch; user can re-open by clicking title.
+            setInfoPanelOpen(false);
+        } else {
+            els.chatStatus.classList.remove('text-xs', 'text-gray-400');
+            let dot = document.getElementById(`presence-${cid}`);
+            let isOnline = dot && dot.classList.contains('online');
+            els.chatStatus.innerHTML = isOnline ? '🟢 Online' : '⚪ Offline';
+            setInfoPanelOpen(false);
+        }
 
         els.chatEmpty.style.display = 'none';
         els.chatView.style.display = 'flex';
@@ -707,6 +1191,14 @@ window.addEventListener('DOMContentLoaded', () => {
         highestMessageTimestamp = null;
 
         els.chatMessagesScroll.scrollTop = 0;
+
+        // Ensure group key is available before decrypting history.
+        if (String(conv?.type || '').toUpperCase() === 'GROUP') {
+            await loadGroupKeyForConversation(conv);
+        } else {
+            clearMissingGroupKeyBanner();
+        }
+
         await loadMessages(cid, null);
         scrollToBottom();
 
@@ -736,7 +1228,22 @@ window.addEventListener('DOMContentLoaded', () => {
     async function prependMessageToUI(m) {
         const isSent = sameUserId(m.sender_id, currentUser.id);
         let text = "";
-        if (!currentUser.keys || !currentUser.keys.privateKeyPem) {
+        const conv = conversationsObj[m.conversation_id];
+        const cType = String(conv?.type || '').toUpperCase();
+
+        if (cType === 'GROUP') {
+            const kB64 = getCachedGroupKeyB64(m.conversation_id);
+            if (!kB64) {
+                text = "⚠️ Missing group key (local cache).";
+            } else {
+                try {
+                    text = await decryptGroupMessage(m.content_encrypted, m.iv, kB64);
+                } catch (e) {
+                    text = "⚠️ [Group decrypt failed]";
+                    console.error("[E2EE] group decrypt failed", m.message_id, e);
+                }
+            }
+        } else if (!currentUser.keys || !currentUser.keys.privateKeyPem) {
             text = "⚠️ Vui lòng thiết lập khóa bảo mật để đọc tin nhắn này";
             console.warn("[E2EE] Decryption skipped: Private key missing.");
         } else if ((m.key_for_sender || m.key_for_receiver) && m.iv) {
@@ -815,21 +1322,27 @@ window.addEventListener('DOMContentLoaded', () => {
         if (!text || !currentConversationId) return;
         const conv = conversationsObj[currentConversationId];
         if (!conv || !conv.participants) return alert("Conversation corrupted");
-        const receiver = conv.participants.find(p => !sameUserId(p.user_id, currentUser.id));
-        if (!receiver) return alert("No receiver found in this conversation");
         try {
             els.btnSend.disabled = true;
+            const cType = String(conv.type || 'DIRECT').toUpperCase();
+            if (cType === 'GROUP') {
+                const kB64 = getCachedGroupKeyB64(currentConversationId);
+                if (!kB64) throw new Error('Missing group key in local cache. Re-open group from a device that has the key, or re-invite you with a new key copy.');
+                const enc = await encryptGroupMessage(text, kB64);
+                await api.chat.sendMessage(currentConversationId, enc.content_encrypted, '', '', enc.iv);
+                appendMessageToUI(currentUser.id, text, new Date(), true);
+                updateSidebarLastMsg(currentConversationId, "You: " + text, new Date());
+                els.msgInput.value = '';
+                return;
+            }
+
+            const receiver = conv.participants.find(p => !sameUserId(p.user_id, currentUser.id));
+            if (!receiver) return alert("No receiver found in this conversation");
             console.log("Encrypting with Public Key of user:", receiver.user_id);
             const pubKey = await e2e.getPublicKey(receiver.user_id);
             if (!pubKey) throw new Error("Could not fetch receiver's public key (they might need to set one up)");
             const hybrid = await encryptHybridForPeer(text, pubKey);
-            await api.chat.sendMessage(
-                currentConversationId,
-                hybrid.content_encrypted,
-                hybrid.key_for_sender,
-                hybrid.key_for_receiver,
-                hybrid.iv
-            );
+            await api.chat.sendMessage(currentConversationId, hybrid.content_encrypted, hybrid.key_for_sender, hybrid.key_for_receiver, hybrid.iv);
             appendMessageToUI(currentUser.id, text, new Date(), true);
             updateSidebarLastMsg(currentConversationId, "You: " + text, new Date());
             els.msgInput.value = '';
@@ -842,7 +1355,22 @@ window.addEventListener('DOMContentLoaded', () => {
         if (sameUserId(data.sender_id, currentUser.id)) return;
 
         let text = "";
-        if (!currentUser.keys || !currentUser.keys.privateKeyPem) {
+        const conv = conversationsObj[cid];
+        const cType = String(conv?.type || '').toUpperCase();
+
+        if (cType === 'GROUP') {
+            const kB64 = getCachedGroupKeyB64(cid);
+            if (!kB64) {
+                text = "⚠️ Missing group key (local cache).";
+            } else {
+                try {
+                    text = await decryptGroupMessage(data.content_encrypted, data.iv, kB64);
+                } catch (e) {
+                    text = "⚠️ [Group decrypt failed]";
+                    console.error("[E2EE] incoming group decrypt failed", data.message_id, e);
+                }
+            }
+        } else if (!currentUser.keys || !currentUser.keys.privateKeyPem) {
             text = "⚠️ Vui lòng thiết lập khóa bảo mật để đọc tin nhắn này";
             console.warn("[E2EE] Incoming message decryption skipped: Private key missing.");
         } else if ((data.key_for_sender || data.key_for_receiver) && data.iv) {
@@ -893,7 +1421,9 @@ window.addEventListener('DOMContentLoaded', () => {
 
         const now = Date.now();
         if (now - lastTypingSent > 2000) { // Throttle: 2 seconds
-            const channel = `chat:${currentConversationId}`;
+            const cType = String(conversationsObj[currentConversationId]?.type || 'DIRECT').toUpperCase();
+            const prefix = cType === 'GROUP' ? 'groups' : 'chat';
+            const channel = `${prefix}:${currentConversationId}`;
             const payload = {
                 type: 'TYPING',
                 user_id: String(currentUser.id), // Ensure string for comparison
@@ -916,7 +1446,9 @@ window.addEventListener('DOMContentLoaded', () => {
     function stopTyping() {
         if (!currentConversationId || !centrifuge) return;
         clearTimeout(typingTimeout);
-        const channel = `chat:${currentConversationId}`;
+        const cType = String(conversationsObj[currentConversationId]?.type || 'DIRECT').toUpperCase();
+        const prefix = cType === 'GROUP' ? 'groups' : 'chat';
+        const channel = `${prefix}:${currentConversationId}`;
         const payload = {
             type: 'STOP_TYPING',
             user_id: String(currentUser.id),
@@ -1213,12 +1745,69 @@ window.addEventListener('DOMContentLoaded', () => {
                 showToast("You have a new friend request! 👋");
                 break;
 
+            case 'ADDED_TO_GROUP':
+                handleAddedToGroup(data);
+                break;
+
             case 'conversation_created':
                 handleNewConversationCreated(data);
                 break;
 
             default:
                 console.log('[SystemEvent] Unknown type:', data.type);
+        }
+    }
+
+    async function handleAddedToGroup(evt) {
+        try {
+            const d = evt?.data || {};
+            const groupId = String(d.id || '').trim();
+            const groupName = String(d.name || 'Group').trim();
+            const encryptedGroupKey = d.encrypted_group_key || d.encryptedGroupKey || '';
+            const memberCount = Number(d.member_count ?? d.memberCount ?? 0);
+
+            if (!groupId) throw new Error('Missing group id in notification');
+
+            // If already exists, just update member_count/type and refresh UI.
+            if (conversationsObj[groupId]) {
+                conversationsObj[groupId].type = 'GROUP';
+                conversationsObj[groupId].name = conversationsObj[groupId].name || groupName;
+                conversationsObj[groupId].encrypted_group_key = conversationsObj[groupId].encrypted_group_key || encryptedGroupKey;
+                if (Number.isFinite(memberCount) && memberCount > 0) conversationsObj[groupId].member_count = memberCount;
+                renderSidebarItem(conversationsObj[groupId]);
+                return;
+            }
+
+            // Step 1: Decrypt and cache the AES group key (raw b64).
+            try {
+                const rawB64 = await decryptGroupKeyToRawB64(encryptedGroupKey, currentUser?.keys?.privateKeyPem);
+                cacheGroupKey(groupId, rawB64);
+            } catch (e) {
+                console.error('[E2EE] failed to decrypt group key from ADDED_TO_GROUP', e);
+                // Continue anyway: user can still see the group and request re-key if needed.
+            }
+
+            // Step 2: Update conversations "state" and render at top.
+            const conv = {
+                id: groupId,
+                name: groupName,
+                type: 'GROUP',
+                encrypted_group_key: encryptedGroupKey,
+                member_count: (Number.isFinite(memberCount) && memberCount > 0) ? memberCount : 0,
+                participants: [] // optional; not required for sidebar rendering
+            };
+            conversationsObj[groupId] = conv;
+            ws.subscribe(groupId, conv.type);
+            renderSidebarItem(conv);
+
+            const convEl = document.getElementById(`conv-${groupId}`);
+            if (convEl && els.convList.firstChild !== convEl) els.convList.prepend(convEl);
+
+            // Step 3 (Optional): Toast.
+            showToast(`You have been added to group ${groupName}`);
+        } catch (err) {
+            console.error('[SystemEvent] ADDED_TO_GROUP failed', err);
+            showToast('Failed to add group to sidebar: ' + (err?.message || String(err)), true);
         }
     }
 
@@ -1246,10 +1835,11 @@ window.addEventListener('DOMContentLoaded', () => {
         };
 
         conversationsObj[conversation_id] = conv;
-        ws.subscribe(conversation_id);
+        ws.subscribe(conversation_id, conv.type);
 
         // Fetch presence immediately for the new chat
-        const presence = await ws.getPresence(`chat:${conversation_id}`);
+        const prefix = String(conv.type || '').toUpperCase() === 'GROUP' ? 'groups' : 'chat';
+        const presence = await ws.getPresence(`${prefix}:${conversation_id}`);
         for (let clientID in presence) {
             const info = presence[clientID];
             if (info && info.user) updatePresenceUI(info.user, 'online', conversation_id);
