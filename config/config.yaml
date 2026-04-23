@@ -7,5 +7,5 @@ CENTRIFUGO_API_URL: "http://centrifugo:8000/api"
 CENTRIFUGO_API_KEY: "SECRET_KEY"
 JWT_SECRET: "SECRET_KEY"
 # 32-byte hex or any string (hashed with SHA-256) for AES-256-GCM wrapping of user RSA private keys
-MASTER_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+MASTER_KEY: "teUh-FDgne+jygKWcmMQ-P#YVMjPFmUsj5a?s#v$Mdx-uRwNJN6@Kr+fbpc+DAmD"
 PORT: "8080"

@@ -1,5 +1,3 @@
-
-
 services:
   chat-service:
     build:
@@ -8,8 +6,6 @@ services:
     container_name: chat-service
     ports:
       - "8080:8080"
-    environment:
-      - MASTER_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
     volumes:
       - ./config/config.yaml:/app/config/config.yaml
     depends_on:
@@ -44,7 +40,7 @@ services:
       retries: 5
 
   scylladb:
-    image: scylladb/scylla:latest
+    image: scylladb/scylla:2026.1.1
     command: --smp 1 --memory 1G --overprovisioned 1 --api-address 0.0.0.0
     ports:
       - "9042:9042"
