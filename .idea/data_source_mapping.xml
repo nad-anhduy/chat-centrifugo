@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="DataSourcePerFileMappings">
+    <file url="file://$PROJECT_DIR$/migrations/0001_initial_postgres.up.sql" value="377d3741-9975-4040-aa65-1a731e88515f" />
+  </component>
+</project>
